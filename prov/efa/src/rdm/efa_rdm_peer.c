@@ -46,6 +46,20 @@ void efa_rdm_peer_construct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep, st
 	efa_rdm_rxe_map_construct(&peer->rxe_map);
 }
 
+void efa_rdm_peer_release_overflow_pkes(struct efa_rdm_peer *peer)
+{
+	struct dlist_entry *tmp;
+	struct efa_rdm_peer_overflow_pke_list_entry *overflow_pke_list_entry;
+
+	dlist_foreach_container_safe(&peer->overflow_pke_list,
+				     struct efa_rdm_peer_overflow_pke_list_entry,
+				     overflow_pke_list_entry, entry, tmp) {
+		dlist_remove(&overflow_pke_list_entry->entry);
+		efa_rdm_pke_release_rx_list(overflow_pke_list_entry->pkt_entry);
+		ofi_buf_free(overflow_pke_list_entry);
+	}
+}
+
 /**
  * @brief clear resources accociated with a peer
  *
@@ -60,7 +74,6 @@ void efa_rdm_peer_destruct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep)
 	struct efa_rdm_ope *txe;
 	struct efa_rdm_ope *rxe;
 	struct efa_rdm_pke *pkt_entry;
-	struct efa_rdm_peer_overflow_pke_list_entry *overflow_pke_list_entry;
 
 	if (peer->robuf.pending)
 		efa_recvwin_free(&peer->robuf, true);
@@ -83,13 +96,8 @@ void efa_rdm_peer_destruct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep)
 		pkt_entry->peer = NULL;
 	}
 
-	dlist_foreach_container_safe(&peer->overflow_pke_list,
-				     struct efa_rdm_peer_overflow_pke_list_entry,
-				     overflow_pke_list_entry, entry, tmp) {
-		dlist_remove(&overflow_pke_list_entry->entry);
-		efa_rdm_pke_release_rx(overflow_pke_list_entry->pkt_entry);
-		ofi_buf_free(overflow_pke_list_entry);
-	}
+
+	efa_rdm_peer_release_overflow_pkes(peer);
 
 	dlist_foreach_container_safe(&peer->txe_list,
 				     struct efa_rdm_ope,

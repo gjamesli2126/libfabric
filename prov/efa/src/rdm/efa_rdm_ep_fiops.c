@@ -726,6 +726,11 @@ static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep)
 	struct efa_av_entry *av_entry;
 	struct efa_conn_ep_peer_map_entry *peer_map_entry;
 
+	/* Release overflow packets from every peer up front only.*/
+	dlist_foreach_container(&efa_rdm_ep->ep_peer_list,struct efa_rdm_peer, peer, ep_peer_list_entry) {
+		efa_rdm_peer_release_overflow_pkes(peer);
+	}
+
 #if ENABLE_DEBUG
 	struct efa_rdm_pke *pkt_entry;
 
