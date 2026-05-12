@@ -1770,9 +1770,10 @@ int efa_rdm_rxe_post_local_read_or_queue(struct efa_rdm_ope *rxe,
 	/* The rx pkts are held until the local read completes */
 	if (err)
 		efa_rdm_txe_release(txe);
-	else if (txe->local_read_pkt_entry->alloc_type == EFA_RDM_PKE_FROM_EFA_RX_POOL)
-		txe->ep->efa_rx_pkts_held++;
-
+	else{
+		/*Local RDMA read posted*/
+		efa_rdm_pke_mark_held(txe->local_read_pkt_entry);
+	}
 	return err;
 }
 
