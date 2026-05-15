@@ -70,6 +70,7 @@ void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 		tx_op_flags &= ~FI_COMPLETION;
 	txe->fi_flags = fi_flags | tx_op_flags;
 	txe->bytes_runt = 0;
+	txe->local_read_pkt_entry = NULL;
 	dlist_init(&txe->entry);
 
 	switch (op) {
@@ -149,6 +150,12 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
 		dlist_remove(&txe->queued_entry);
 		txe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
+	}
+
+	/* Release held rx pkt if txe is torn down before local read completes; success path NULLs this to avoid double-release. */
+	if (txe->local_read_pkt_entry) {
+		efa_rdm_pke_release_rx(txe->local_read_pkt_entry);
+		txe->local_read_pkt_entry = NULL;
 	}
 
 #ifdef ENABLE_EFA_POISONING

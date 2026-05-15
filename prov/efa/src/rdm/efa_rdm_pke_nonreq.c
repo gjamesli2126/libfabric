@@ -512,7 +512,8 @@ void efa_rdm_pke_handle_rma_read_completion(struct efa_rdm_pke *context_pkt_entr
 			if (txe->peer == NULL) {
 				data_pkt_entry = txe->local_read_pkt_entry;
 				assert(data_pkt_entry->payload_size > 0);
-				/* Hand off pkt release to efa_rdm_pke_handle_data_copied() below */
+				/* Hand off pkt release to efa_rdm_pke_handle_data_copied() below; NULL the txe ref so efa_rdm_txe_release() doesn't double-free. */
+				txe->local_read_pkt_entry = NULL;
 				efa_rdm_tracepoint(rx_pke_local_read_copy_payload_end, (size_t) data_pkt_entry, data_pkt_entry->payload_size, data_pkt_entry->ope->msg_id, (size_t) data_pkt_entry->ope->cq_entry.op_context, data_pkt_entry->ope->total_len);
 				efa_rdm_pke_handle_data_copied(data_pkt_entry);
 			} else {
