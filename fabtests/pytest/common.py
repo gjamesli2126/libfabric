@@ -470,6 +470,23 @@ def _ensure_no_oob_listener(host_id, port):
         raise RuntimeError(
             "OOB port {} on {} is still held by a listener after cleanup attempts. Host may be unclean.".format(port, host_id))
 
+_INJECT_MARKER = "/tmp/fabtests_ssh_fault_injected"
+
+
+def _maybe_inject_ssh_failure():
+    """Raise SshConnectionError once per host, after the server was spawned.
+    The atomic O_CREAT|O_EXCL marker file guarantees the fault fires exactly
+    once even with multiple pytest-xdist workers, mimicking the single
+    transient SSH drop seen on worker gw5 in build #798.
+    """
+    try:
+        fd = os.open(_INJECT_MARKER, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return
+    os.close(fd)
+    print("FAULT INJECTION: raising SshConnectionError after server spawn "
+          "(repro of P480938480 / LibfabricMainCanary #798)")
+    raise SshConnectionError()
 
 def _wait_for_server_listening(host_id, port, server_process,
                                server_log_path=None):
@@ -480,6 +497,7 @@ def _wait_for_server_listening(host_id, port, server_process,
     Server stdout is redirected to server_log_path, so read output from
     the log file rather than the process pipe.
     """
+    _maybe_inject_ssh_failure()
     def server_output():
         if not server_log_path:
             return "<no server log>"
