@@ -76,6 +76,10 @@ EFA_RDM_PROTO_DEF(eager,
 	.req_pkt_type_dc = EFA_RDM_DC_EAGER_MSGRTM_PKT,
 	.req_pkt_type_tagged = EFA_RDM_EAGER_TAGRTM_PKT,
 	.req_pkt_type_tagged_dc = EFA_RDM_DC_EAGER_TAGRTM_PKT,
+	/*
+	 * Per-packet callbacks own eager completion accounting, so there is no
+	 * protocol-wide state to update after the request packet is posted.
+	 */
 	.handle_tx_pkes_posted = &efa_rdm_proto_handle_tx_pkes_posted_no_op,
 	.handle_unexp_pke_match = &efa_rdm_proto_eager_handle_matched_rtm,
 );
@@ -91,6 +95,8 @@ EFA_RDM_PROTO_DEF(eager,
  * must also wait for the peer's RECEIPT, so it only releases the TXE here if
  * that RECEIPT already arrived; otherwise
  * efa_rdm_proto_handle_receipt_recv() reports the completion and releases it.
+ * efa_rdm_proto_eager_construct_tx_pkes() installs this handler on the
+ * request PKE.
  */
 ssize_t efa_rdm_proto_eager_handle_rtm_send_completion(
 	struct efa_rdm_pke *pkt_entry)
