@@ -10,6 +10,8 @@
 
 #define EFA_RDM_IOV_LIMIT		(4)
 
+struct efa_rdm_atomic_proto;
+
 /**
  * @brief EFA RDM operation entry (ope) type
  */
@@ -92,6 +94,7 @@ struct efa_rdm_ope {
 	struct efa_rdm_ep *ep;
 	struct efa_rdm_peer *peer;
 	struct efa_rdm_proto *proto; /**< protocol used by the refactored send path; NULL in the old code path */
+	const struct efa_rdm_atomic_proto *atomic_proto;
 
 	uint32_t tx_id;
 	uint32_t rx_id;

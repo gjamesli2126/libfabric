@@ -1107,6 +1107,42 @@ void efa_rdm_pke_handle_receipt_send_completion(struct efa_rdm_pke *pkt_entry)
 		efa_rdm_rxe_release(rxe);
 }
 
+void efa_rdm_pke_handle_receipt_recv(struct efa_rdm_pke *pkt_entry)
+{
+	struct efa_rdm_ope *txe = NULL;
+	struct efa_rdm_receipt_hdr *receipt_hdr;
+
+	receipt_hdr = efa_rdm_pke_get_receipt_hdr(pkt_entry);
+	/* Retrieve the txe that will be written into TX CQ*/
+	txe = efa_rdm_ep_live_txe_from_id(pkt_entry->ep, receipt_hdr->tx_id);
+	if (!txe) {
+		EFA_INFO(FI_LOG_CQ,
+			 "RECEIPT names a send that is no longer live, dropping it\n");
+		efa_rdm_pke_release_rx(pkt_entry);
+		return;
+	}
+
+	/* Remove from ope_longcts_send_list since operation is complete */
+	if (txe->state == EFA_RDM_OPE_SEND) {
+		dlist_remove(&txe->entry);
+	}
+
+	/*
+	 * Mark that the remote ack (RECEIPT) has arrived.
+	 * The txe is released either here or in
+	 * efa_rdm_pke_handle_send_completion() for the DC
+	 * request/CTSDATA packet, whichever happens last.
+	 * Report completion as soon as the destination has applied the
+	 * operation, but release only after the send completion also arrives.
+	 */
+	txe->internal_flags |= EFA_RDM_TXE_REMOTE_ACK_RECEIVED;
+	efa_rdm_txe_report_completion(txe);
+	if (efa_rdm_txe_with_remote_ack_ready_for_release(txe))
+		efa_rdm_txe_release(txe);
+
+	efa_rdm_pke_release_rx(pkt_entry);
+}
+
 /* atomrsp packet related functions: init, handle_sent, handle_send_completion and recv
  *
  * initialize atomic response packet by creating a packet that hold original data

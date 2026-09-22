@@ -9,6 +9,7 @@
 #include "efa_cntr.h"
 #include "efa_rdm_atomic.h"
 #include "efa_rdm_pke_cmd.h"
+#include "protocols/efa_rdm_proto_atomic.h"
 
 static void efa_rdm_atomic_init_shm_msg(struct efa_rdm_ep *ep, struct fi_msg_atomic *shm_msg,
 				    const struct fi_msg_atomic *msg,
@@ -84,7 +85,10 @@ efa_rdm_atomic_alloc_txe(struct efa_rdm_ep *efa_rdm_ep,
 	txe->atomic_hdr.atomic_op = msg_atomic->op;
 	txe->atomic_hdr.datatype = msg_atomic->datatype;
 
-	if (op == ofi_op_atomic_fetch || op == ofi_op_atomic_compare) {
+	if (op == ofi_op_atomic) {
+		assert(!txe->proto);
+		txe->atomic_proto = &efa_rdm_atomic_write_proto;
+	} else if (op == ofi_op_atomic_fetch || op == ofi_op_atomic_compare) {
 		assert(atomic_ex);
 		memcpy(&txe->atomic_ex, atomic_ex, sizeof(struct efa_rdm_atomic_ex));
 	}
@@ -101,25 +105,21 @@ efa_rdm_atomic_alloc_txe(struct efa_rdm_ep *efa_rdm_ep,
  */
 ssize_t efa_rdm_atomic_post_atomic(struct efa_rdm_ep *efa_rdm_ep, struct efa_rdm_ope *txe)
 {
-	bool delivery_complete_requested;
 	static int req_pkt_type_list[] = {
-		[ofi_op_atomic] = EFA_RDM_WRITE_RTA_PKT,
 		[ofi_op_atomic_fetch] = EFA_RDM_FETCH_RTA_PKT,
 		[ofi_op_atomic_compare] = EFA_RDM_COMPARE_RTA_PKT
 	};
 
-	delivery_complete_requested = txe->fi_flags & FI_DELIVERY_COMPLETE;
+	if (txe->atomic_proto)
+		return efa_rdm_proto_atomic_post(txe);
 
-	if (delivery_complete_requested && txe->op == ofi_op_atomic) {
-		return efa_rdm_ope_post_send(txe, EFA_RDM_DC_WRITE_RTA_PKT);
-	} else {
-		/*
-		 * Fetch atomic and compare atomic
-		 * support DELIVERY_COMPLETE
-		 * by nature
-		 */
-		return efa_rdm_ope_post_send(txe, req_pkt_type_list[txe->op]);
-	}
+	assert(txe->op == ofi_op_atomic_fetch ||
+	       txe->op == ofi_op_atomic_compare);
+	/*
+	 * Fetch and compare atomics support DELIVERY_COMPLETE by nature.
+	 * They remain on the legacy path until their protocol migration.
+	 */
+	return efa_rdm_ope_post_send(txe, req_pkt_type_list[txe->op]);
 }
 
 static
@@ -142,6 +142,11 @@ ssize_t efa_rdm_atomic_generic_efa(struct efa_rdm_ep *efa_rdm_ep,
 	assert(peer);
 
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
+		err = -FI_EAGAIN;
+		goto out;
+	}
+
+	if (efa_rdm_ep_get_available_tx_pkts(efa_rdm_ep) == 0) {
 		err = -FI_EAGAIN;
 		goto out;
 	}
@@ -642,4 +647,3 @@ struct fi_ops_atomic efa_rdm_atomic_ops = {
 	.readwritevalid = efa_rdm_atomic_readwrite_valid,
 	.compwritevalid = efa_rdm_atomic_compwrite_valid,
 };
-

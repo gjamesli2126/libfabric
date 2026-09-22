@@ -895,4 +895,14 @@ void test_proto_eager_send_completion_releases_txe(void **state);
 void test_proto_eager_assigns_msg_id(void **state);
 void test_proto_eager_queued_before_handshake_survives_mr_gen_check(void **state);
 void test_proto_eager_construct_pkes_failure_rolls_back_msg_id(void **state);
+void test_proto_atomic_write_constructs_callback_pke(void **state);
+void test_proto_atomic_dc_send_first(void **state);
+void test_proto_atomic_dc_receipt_first(void **state);
+void test_proto_atomic_dc_receipt_then_send_error_reports_success(void **state);
+void test_proto_atomic_single_packet_boundary(void **state);
+void test_proto_atomic_dc_single_packet_boundary(void **state);
+void test_proto_atomic_post_failure_rolls_back_msg_id(void **state);
+void test_proto_atomic_inject_copies_operand(void **state);
+void test_proto_atomic_rnr_retry_preserves_callback(void **state);
+void test_proto_atomic_non_rnr_error_releases_txe(void **state);
 #endif
