@@ -798,6 +798,173 @@ void test_efa_rdm_ep_atomic_without_caps(void **state)
 	assert_int_equal(err, -FI_EOPNOTSUPP);
 }
 
+/**
+ * @brief Verify EFA's local atomic path honors the SHM atomic size limit.
+ *
+ * @param[in] state	struct efa_resource that is managed by the framework
+ */
+void test_efa_rdm_ep_local_atomic_respects_shm_limit(void **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_unit_test_buff send_buff;
+	struct efa_unit_test_buff compare_buff;
+	struct efa_unit_test_buff result_buff;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_ep_addr raw_addr = {0};
+	struct fi_msg_atomic msg = {0};
+	struct fi_atomic_attr attr;
+	struct fi_ioc ioc;
+	struct fi_rma_ioc rma_ioc;
+	size_t raw_addr_len = sizeof(raw_addr);
+	size_t efa_count, shm_write_count, shm_fetch_count, shm_compare_count;
+	size_t max_count;
+	void *send_desc;
+	void *compare_desc;
+	void *result_desc;
+	fi_addr_t peer_addr;
+	int ret;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep,
+				  base_ep.util_ep.ep_fid);
+	assert_non_null(efa_rdm_ep->shm_ep);
+
+	ret = fi_atomicvalid(resource->ep, FI_UINT8, FI_ATOMIC_WRITE,
+			     &efa_count);
+	assert_int_equal(ret, 0);
+	ret = fi_atomicvalid(efa_rdm_ep->shm_ep, FI_UINT8, FI_ATOMIC_WRITE,
+			     &shm_write_count);
+	assert_int_equal(ret, 0);
+	ret = fi_query_atomic(resource->domain, FI_UINT8, FI_ATOMIC_WRITE,
+			      &attr, 0);
+	assert_int_equal(ret, 0);
+	assert_int_equal(efa_count, MIN(attr.count, shm_write_count));
+
+	ret = fi_fetch_atomicvalid(efa_rdm_ep->shm_ep, FI_UINT8, FI_SUM,
+				   &shm_fetch_count);
+	assert_int_equal(ret, 0);
+	ret = fi_fetch_atomicvalid(resource->ep, FI_UINT8, FI_SUM,
+				   &efa_count);
+	assert_int_equal(ret, 0);
+	ret = fi_query_atomic(resource->domain, FI_UINT8, FI_SUM, &attr,
+			      FI_FETCH_ATOMIC);
+	assert_int_equal(ret, 0);
+	assert_int_equal(efa_count, MIN(attr.count, shm_fetch_count));
+
+	ret = fi_compare_atomicvalid(efa_rdm_ep->shm_ep, FI_UINT8, FI_CSWAP,
+				     &shm_compare_count);
+	assert_int_equal(ret, 0);
+	ret = fi_compare_atomicvalid(resource->ep, FI_UINT8, FI_CSWAP,
+				     &efa_count);
+	assert_int_equal(ret, 0);
+	ret = fi_query_atomic(resource->domain, FI_UINT8, FI_CSWAP, &attr,
+			      FI_COMPARE_ATOMIC);
+	assert_int_equal(ret, 0);
+	assert_int_equal(efa_count, MIN(attr.count, shm_compare_count));
+
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
+	assert_int_equal(ret, 1);
+
+	max_count = MAX(shm_write_count, shm_fetch_count);
+	max_count = MAX(max_count, shm_compare_count);
+	efa_unit_test_buff_construct(&send_buff, resource, max_count + 1);
+	efa_unit_test_buff_construct(&compare_buff, resource, max_count + 1);
+	efa_unit_test_buff_construct(&result_buff, resource, max_count + 1);
+	send_desc = fi_mr_desc(send_buff.mr);
+	compare_desc = fi_mr_desc(compare_buff.mr);
+	result_desc = fi_mr_desc(result_buff.mr);
+
+	ret = fi_atomic(resource->ep, send_buff.buff, shm_write_count + 1,
+			fi_mr_desc(send_buff.mr), peer_addr, 0, 0,
+			FI_UINT8, FI_ATOMIC_WRITE, NULL);
+	assert_int_equal(ret, -FI_ETRUNC);
+
+	ret = fi_inject_atomic(resource->ep, send_buff.buff,
+			       shm_write_count + 1, peer_addr, 0, 0,
+			       FI_UINT8, FI_ATOMIC_WRITE);
+	assert_int_equal(ret, -FI_ETRUNC);
+
+	ioc.addr = send_buff.buff;
+	ioc.count = shm_write_count + 1;
+	rma_ioc.addr = 0;
+	rma_ioc.count = shm_write_count + 1;
+	rma_ioc.key = 0;
+	msg.msg_iov = &ioc;
+	msg.desc = &send_desc;
+	msg.iov_count = 1;
+	msg.addr = peer_addr;
+	msg.rma_iov = &rma_ioc;
+	msg.rma_iov_count = 1;
+	msg.datatype = FI_UINT8;
+	msg.op = FI_ATOMIC_WRITE;
+	ret = fi_atomicmsg(resource->ep, &msg, FI_INJECT);
+	assert_int_equal(ret, -FI_ETRUNC);
+
+	ret = fi_fetch_atomic(resource->ep, send_buff.buff,
+			      shm_fetch_count + 1, send_desc,
+			      result_buff.buff, result_desc, peer_addr, 0, 0,
+			      FI_UINT8, FI_SUM, NULL);
+	assert_int_equal(ret, -FI_ETRUNC);
+
+	ret = fi_compare_atomic(resource->ep, send_buff.buff,
+				shm_compare_count + 1, send_desc,
+				compare_buff.buff, compare_desc,
+				result_buff.buff, result_desc, peer_addr, 0, 0,
+				FI_UINT8, FI_CSWAP, NULL);
+	assert_int_equal(ret, -FI_ETRUNC);
+
+	efa_unit_test_buff_destruct(&result_buff);
+	efa_unit_test_buff_destruct(&compare_buff);
+	efa_unit_test_buff_destruct(&send_buff);
+}
+
+void test_efa_rdm_ep_atomic_valid_uses_endpoint_shm_state(void **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *ep;
+	struct efa_rdm_domain *rdm_domain;
+	struct fid_domain *saved_shm_domain;
+	struct fid_ep *saved_shm_ep;
+	struct fi_atomic_attr efa_attr;
+	size_t count;
+	size_t shm_count;
+	int ret;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	ep = container_of(resource->ep, struct efa_rdm_ep,
+			  base_ep.util_ep.ep_fid);
+	rdm_domain = efa_rdm_ep_rdm_domain(ep);
+	assert_non_null(ep->shm_ep);
+	assert_non_null(rdm_domain->shm_domain);
+
+	ret = fi_query_atomic(resource->domain, FI_UINT8, FI_ATOMIC_WRITE,
+			      &efa_attr, 0);
+	assert_int_equal(ret, 0);
+	ret = fi_atomicvalid(ep->shm_ep, FI_UINT8, FI_ATOMIC_WRITE,
+			     &shm_count);
+	assert_int_equal(ret, 0);
+
+	saved_shm_domain = rdm_domain->shm_domain;
+	rdm_domain->shm_domain = NULL;
+	ret = fi_atomicvalid(resource->ep, FI_UINT8, FI_ATOMIC_WRITE,
+			     &count);
+	rdm_domain->shm_domain = saved_shm_domain;
+	assert_int_equal(ret, 0);
+	assert_int_equal(count, MIN(efa_attr.count, shm_count));
+
+	saved_shm_ep = ep->shm_ep;
+	ep->shm_ep = NULL;
+	ret = fi_atomicvalid(resource->ep, FI_UINT8, FI_ATOMIC_WRITE,
+			     &count);
+	ep->shm_ep = saved_shm_ep;
+	assert_int_equal(ret, 0);
+	assert_int_equal(count, efa_attr.count);
+}
+
 /*
  * Check fi_getopt return with different input opt_len
  */
