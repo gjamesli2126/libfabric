@@ -312,3 +312,48 @@ TEST_F(EfaRdmProtoMediumCompletionTest, peer_abort_completes_txe_once)
 	EXPECT_EQ(res.final_err, FI_ECANCELED);
 	EXPECT_EQ(res.final_prov_errno, efa_test_proto_peer_abort_prov_errno());
 }
+
+class EfaRdmProtoAtomicTest : public Test
+{
+	protected:
+	struct efa_resource resource = {};
+	StrictMock<MockEfa> mock_efa;
+
+	void SetUp() override
+	{
+		struct fi_info *hints;
+
+		hints = efa_test_alloc_default_hints(FI_EP_RDM,
+						    EFA_FABRIC_NAME);
+		ASSERT_NE(hints, nullptr);
+		hints->caps |= FI_ATOMIC;
+		efa_test_resource_construct(&resource, hints);
+		ASSERT_NE(resource.ep, nullptr);
+		MockEfa::set(&mock_efa);
+	}
+
+	void TearDown() override
+	{
+		MockEfa::set(nullptr);
+		efa_test_resource_destruct(&resource);
+	}
+};
+
+TEST_F(EfaRdmProtoAtomicTest, pke_init_copy_failure_rolls_back_send_state)
+{
+	struct efa_test_proto_atomic_failure_result res = {};
+
+	EFA_EXPECT_CALL(mock_efa, efa_copy_from_hmem_iov)
+		.WillOnce(Return(-FI_EIO));
+	EFA_EXPECT_CALL(mock_efa, efa_qp_post_send).Times(0);
+
+	ASSERT_EQ(efa_test_pke_init_copy_failure_rolls_back_send_state(
+			  resource.ep, resource.av, resource.domain, &res),
+		  0);
+	EXPECT_EQ(res.ret, -FI_EIO);
+	EXPECT_EQ(res.tx_pkt_free_after, res.tx_pkt_free_before);
+	EXPECT_EQ(res.txe_free_after, res.txe_free_before);
+	EXPECT_EQ(res.next_msg_id_after, res.next_msg_id_before);
+	EXPECT_EQ(res.ope_list_before, 0u);
+	EXPECT_EQ(res.ope_list_after, res.ope_list_before);
+}

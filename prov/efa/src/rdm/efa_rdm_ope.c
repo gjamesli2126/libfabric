@@ -31,6 +31,7 @@ void efa_rdm_txe_construct_common(struct efa_rdm_ope *txe,
 	txe->rx_id = EFA_RDM_OPE_ID_INVALID;
 	txe->state = EFA_RDM_TXE_REQ;
 	txe->peer = peer;
+	txe->atomic_proto = NULL;
 	/* peer would be NULL for local read operation */
 	if (txe->peer) {
 		dlist_insert_tail(&txe->peer_entry, &txe->peer->txe_list);

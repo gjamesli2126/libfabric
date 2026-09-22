@@ -1217,9 +1217,6 @@ void efa_rdm_pke_handle_receipt_recv(struct efa_rdm_pke *pkt_entry)
 		return;
 	}
 
-	/* Write send completion immediately to preserve DC semantics */
-	efa_rdm_txe_report_completion(txe);
-
 	/* Remove from ope_longcts_send_list since operation is complete */
 	if (txe->state == EFA_RDM_OPE_SEND) {
 		dlist_remove(&txe->entry);
@@ -1233,8 +1230,22 @@ void efa_rdm_pke_handle_receipt_recv(struct efa_rdm_pke *pkt_entry)
 	 * Release here if the send completion already arrived.
 	 */
 	txe->internal_flags |= EFA_RDM_TXE_REMOTE_ACK_RECEIVED;
-	if (efa_rdm_txe_with_remote_ack_ready_for_release(txe))
-		efa_rdm_txe_release(txe);
+	if (txe->atomic_proto) {
+		/*
+		 * The callback-based atomic path reports completion only after
+		 * both the send completion and RECEIPT arrive. The later event
+		 * performs the cleanup.
+		 */
+		if (efa_rdm_txe_with_remote_ack_ready_for_release(txe)) {
+			efa_rdm_txe_report_completion(txe);
+			efa_rdm_txe_release(txe);
+		}
+	} else {
+		/* Legacy DC protocols report completion when the RECEIPT arrives. */
+		efa_rdm_txe_report_completion(txe);
+		if (efa_rdm_txe_with_remote_ack_ready_for_release(txe))
+			efa_rdm_txe_release(txe);
+	}
 
 	efa_rdm_pke_release_rx(pkt_entry);
 }

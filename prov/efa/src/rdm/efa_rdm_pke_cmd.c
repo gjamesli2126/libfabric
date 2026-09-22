@@ -496,6 +496,16 @@ void efa_rdm_pke_handle_tx_error(struct efa_rdm_pke *pkt_entry, int prov_errno)
 		} else {
 			efa_rdm_txe_handle_error(txe, err, prov_errno);
 			efa_rdm_pke_release_tx(pkt_entry);
+			/*
+			 * The callback-based atomic WRITE path sends one request
+			 * PKE. A non-RNR error cannot be followed by a send
+			 * completion, so the error path releases the TXE after
+			 * the WR drains.
+			 */
+			if (txe->atomic_proto) {
+				assert(txe->efa_outstanding_tx_ops == 0);
+				efa_rdm_txe_release(txe);
+			}
 		}
 		break;
 	case EFA_RDM_RXE:
@@ -712,7 +722,9 @@ void efa_rdm_pke_handle_send_completion(struct efa_rdm_pke *pkt_entry)
 			efa_rdm_txe_release(pkt_entry->ope);
 		break;
 	case EFA_RDM_WRITE_RTA_PKT:
-		efa_rdm_pke_handle_write_rta_send_completion(pkt_entry);
+	case EFA_RDM_DC_WRITE_RTA_PKT:
+		assert(0 && "WRITE RTA protocol moved to refactored code path");
+		abort();
 		break;
 	case EFA_RDM_FETCH_RTA_PKT: /* fall through */
 	case EFA_RDM_COMPARE_RTA_PKT: /* fall through */
@@ -720,7 +732,6 @@ void efa_rdm_pke_handle_send_completion(struct efa_rdm_pke *pkt_entry)
 		 * here or in efa_rdm_pke_handle_atomrsp_recv(), whichever
 		 * happens last. Release here if ATOMRSP already arrived.
 		 */
-	case EFA_RDM_DC_WRITE_RTA_PKT:
 	case EFA_RDM_DC_LONGCTS_MSGRTM_PKT:
 	case EFA_RDM_DC_LONGCTS_TAGRTM_PKT:
 	case EFA_RDM_DC_LONGCTS_RTW_PKT:

@@ -125,6 +125,22 @@ int efa_test_proto_medium_peer_abort(
 	struct fid_domain *domain,
 	struct efa_test_proto_peer_abort_result *out);
 
+struct efa_test_proto_atomic_failure_result {
+	ssize_t ret;
+	size_t tx_pkt_free_before;
+	size_t tx_pkt_free_after;
+	size_t txe_free_before;
+	size_t txe_free_after;
+	uint32_t next_msg_id_before;
+	uint32_t next_msg_id_after;
+	size_t ope_list_before;
+	size_t ope_list_after;
+};
+
+int efa_test_pke_init_copy_failure_rolls_back_send_state(
+	struct fid_ep *ep, struct fid_av *av, struct fid_domain *domain,
+	struct efa_test_proto_atomic_failure_result *out);
+
 /** @brief prov_errno a peer/MR abort reports. */
 int efa_test_proto_peer_abort_prov_errno(void);
 

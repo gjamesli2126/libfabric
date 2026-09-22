@@ -151,8 +151,8 @@ struct efa_rdm_ope *efa_rdm_pke_alloc_rta_rxe(struct efa_rdm_pke *pkt_entry, int
 ssize_t efa_rdm_pke_init_write_rta(struct efa_rdm_pke *pkt_entry,
 				   struct efa_rdm_ope *txe)
 {
-	efa_rdm_pke_init_rta_common(pkt_entry, EFA_RDM_WRITE_RTA_PKT, txe);
-	return 0;
+	return efa_rdm_pke_init_rta_common(pkt_entry, EFA_RDM_WRITE_RTA_PKT,
+					   txe);
 }
 
 /**
@@ -262,9 +262,13 @@ ssize_t efa_rdm_pke_init_dc_write_rta(struct efa_rdm_pke *pkt_entry,
 
 {
 	struct efa_rdm_rta_hdr *rta_hdr;
+	ssize_t err;
 
 	txe->internal_flags |= EFA_RDM_TXE_DELIVERY_COMPLETE_REQUESTED;
-	efa_rdm_pke_init_rta_common(pkt_entry, EFA_RDM_DC_WRITE_RTA_PKT, txe);
+	err = efa_rdm_pke_init_rta_common(pkt_entry,
+					  EFA_RDM_DC_WRITE_RTA_PKT, txe);
+	if (err)
+		return err;
 	rta_hdr = efa_rdm_pke_get_rta_hdr(pkt_entry);
 	rta_hdr->send_id = txe->tx_id;
 	return 0;

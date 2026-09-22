@@ -7,6 +7,8 @@
 
 #include <bitset>
 #include <gmock/gmock.h>
+#include <sys/types.h>
+#include <sys/uio.h>
 #include <vector>
 #include <infiniband/efadv.h>
 #include <infiniband/verbs.h>
@@ -48,6 +50,10 @@ struct dlist_entry;
 	  (struct efa_av_array * cur_reverse_av,                               \
 	   struct efa_av_entry * entry),                                       \
 	  (cur_reverse_av, entry))                                             \
+	X(ssize_t, efa_copy_from_hmem_iov,                                    \
+	  (void **desc, char *buff, size_t buff_size,                          \
+	   const struct iovec *hmem_iov, size_t iov_count),                    \
+	  (desc, buff, buff_size, hmem_iov, iov_count))                        \
 	X(int, efa_ibv_cq_start_poll,                                          \
 	  (struct efa_ibv_cq * ibv_cq, struct ibv_poll_cq_attr * attr),        \
 	  (ibv_cq, attr))                                                      \

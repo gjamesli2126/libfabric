@@ -15,6 +15,7 @@
 #include "rdm/efa_rdm_proto.h"
 #include "rdm/protocols/efa_rdm_proto_medium.h"
 #include "rdm/efa_rdm_protocol.h"
+#include <rdma/fi_atomic.h>
 #include <rdma/fi_errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,18 @@ static size_t efa_test_proto_ope_list_count(struct efa_rdm_ep *ep)
 	size_t count = 0;
 
 	dlist_foreach(&ep->base_ep.ope_list, item)
+		count++;
+
+	return count;
+}
+
+static size_t
+efa_test_proto_bufpool_free_count(struct ofi_bufpool *pool)
+{
+	struct slist_entry *item;
+	size_t count = 0;
+
+	for (item = pool->free_list.entries.head; item; item = item->next)
 		count++;
 
 	return count;
@@ -521,4 +534,61 @@ int efa_test_proto_medium_peer_abort(
 out:
 	efa_test_proto_teardown_buf(&ctx);
 	return err;
+}
+
+int efa_test_pke_init_copy_failure_rolls_back_send_state(
+	struct fid_ep *ep, struct fid_av *av, struct fid_domain *domain,
+	struct efa_test_proto_atomic_failure_result *out)
+{
+	struct efa_test_proto_ctx ctx = {0};
+	struct fi_msg_atomic msg = {0};
+	struct fi_ioc ioc;
+	struct fi_rma_ioc rma_ioc;
+	void *desc;
+	int err;
+
+	memset(out, 0, sizeof(*out));
+
+	err = efa_test_proto_setup_peer(ep, av, &ctx);
+	if (err)
+		return err;
+
+	err = efa_test_proto_setup_buf(domain, &ctx, 16);
+	if (err)
+		return err;
+
+	desc = fi_mr_desc(ctx.mr);
+	ioc.addr = ctx.buf;
+	ioc.count = ctx.len;
+	rma_ioc.addr = 0x1000;
+	rma_ioc.count = ctx.len;
+	rma_ioc.key = 0x1234;
+
+	msg.msg_iov = &ioc;
+	msg.desc = &desc;
+	msg.iov_count = 1;
+	msg.addr = ctx.peer_addr;
+	msg.rma_iov = &rma_ioc;
+	msg.rma_iov_count = 1;
+	msg.datatype = FI_UINT8;
+	msg.op = FI_ATOMIC_WRITE;
+
+	out->tx_pkt_free_before =
+		efa_test_proto_bufpool_free_count(ctx.ep->efa_tx_pkt_pool);
+	out->txe_free_before =
+		efa_test_proto_bufpool_free_count(ctx.ep->base_ep.txe_pool);
+	out->next_msg_id_before = ctx.peer->next_msg_id;
+	out->ope_list_before = efa_test_proto_ope_list_count(ctx.ep);
+
+	out->ret = fi_atomicmsg(ep, &msg, 0);
+
+	out->tx_pkt_free_after =
+		efa_test_proto_bufpool_free_count(ctx.ep->efa_tx_pkt_pool);
+	out->txe_free_after =
+		efa_test_proto_bufpool_free_count(ctx.ep->base_ep.txe_pool);
+	out->next_msg_id_after = ctx.peer->next_msg_id;
+	out->ope_list_after = efa_test_proto_ope_list_count(ctx.ep);
+
+	efa_test_proto_teardown_buf(&ctx);
+	return 0;
 }
