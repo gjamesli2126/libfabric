@@ -11,6 +11,21 @@
 #include "efa_rdm_pke_cmd.h"
 #include "protocols/efa_rdm_proto_atomic.h"
 
+static int
+efa_rdm_atomic_check_shm_write_count(struct fid_ep *shm_ep,
+				     enum fi_datatype datatype,
+				     enum fi_op op, size_t count)
+{
+	size_t max_count;
+	int ret;
+
+	ret = fi_atomicvalid(shm_ep, datatype, op, &max_count);
+	if (ret)
+		return ret;
+
+	return count > max_count ? -FI_ETRUNC : FI_SUCCESS;
+}
+
 static void efa_rdm_atomic_init_shm_msg(struct efa_rdm_ep *ep, struct fi_msg_atomic *shm_msg,
 				    const struct fi_msg_atomic *msg,
 				    struct fi_rma_ioc *rma_iov,
@@ -199,6 +214,11 @@ efa_rdm_atomic_inject(struct fid_ep *ep,
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			err = efa_rdm_atomic_check_shm_write_count(
+				efa_rdm_ep->shm_ep, datatype, op, count);
+			if (err)
+				return err;
+
 			if (!(efa_rdm_ep->shm_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR))
 				remote_addr = 0;
 
@@ -261,6 +281,13 @@ efa_rdm_atomic_writemsg(struct fid_ep *ep,
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, msg->addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			err = efa_rdm_atomic_check_shm_write_count(
+				efa_rdm_ep->shm_ep, msg->datatype, msg->op,
+				ofi_total_ioc_cnt(msg->msg_iov,
+						  msg->iov_count));
+			if (err)
+				return err;
+
 			efa_rdm_atomic_init_shm_msg(efa_rdm_ep, &shm_msg, msg, rma_iov, shm_desc);
 			shm_msg.addr = shm_addr;
 			return fi_atomicmsg(efa_rdm_ep->shm_ep, &shm_msg, flags);
@@ -556,6 +583,7 @@ int efa_rdm_atomic_query(struct fid_domain *domain,
 {
 	struct efa_domain *efa_domain;
 	struct efa_rdm_domain *rdm_domain;
+	struct fi_atomic_attr shm_attr;
 	int ret;
 	size_t max_atomic_size;
 
@@ -590,6 +618,21 @@ int efa_rdm_atomic_query(struct fid_domain *domain,
 	if (OFI_UNLIKELY(!attr->size)) {
 		return -errno;
 	}
+
+	/*
+	 * Atomic validity is endpoint-wide and cannot depend on the eventual
+	 * destination. Advertise a count that is safe for both EFA and the
+	 * local SHM fast path.
+	 */
+	if (rdm_domain->shm_domain) {
+		ret = fi_query_atomic(rdm_domain->shm_domain, datatype, op,
+				      &shm_attr, flags);
+		if (ret)
+			return ret;
+		max_atomic_size = MIN(max_atomic_size,
+				      shm_attr.count * shm_attr.size);
+	}
+
 	attr->count = max_atomic_size / attr->size;
 	return 0;
 }

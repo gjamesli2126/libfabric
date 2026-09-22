@@ -798,6 +798,50 @@ void test_efa_rdm_ep_atomic_without_caps(void **state)
 	assert_int_equal(err, -FI_EOPNOTSUPP);
 }
 
+/**
+ * @brief Verify EFA's local atomic path honors the SHM atomic size limit.
+ *
+ * @param[in] state	struct efa_resource that is managed by the framework
+ */
+void test_efa_rdm_ep_local_atomic_respects_shm_limit(void **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_unit_test_buff send_buff;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_ep_addr raw_addr = {0};
+	size_t raw_addr_len = sizeof(raw_addr);
+	size_t efa_count, shm_count;
+	fi_addr_t peer_addr;
+	int ret;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep,
+				  base_ep.util_ep.ep_fid);
+	assert_non_null(efa_rdm_ep->shm_ep);
+
+	ret = fi_atomicvalid(resource->ep, FI_UINT8, FI_ATOMIC_WRITE,
+			     &efa_count);
+	assert_int_equal(ret, 0);
+	ret = fi_atomicvalid(efa_rdm_ep->shm_ep, FI_UINT8, FI_ATOMIC_WRITE,
+			     &shm_count);
+	assert_int_equal(ret, 0);
+	assert_int_equal(efa_count, shm_count);
+
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
+	assert_int_equal(ret, 1);
+
+	efa_unit_test_buff_construct(&send_buff, resource, shm_count + 1);
+	ret = fi_atomic(resource->ep, send_buff.buff, shm_count + 1,
+			fi_mr_desc(send_buff.mr), peer_addr, 0, 0,
+			FI_UINT8, FI_ATOMIC_WRITE, NULL);
+	assert_int_equal(ret, -FI_ETRUNC);
+	efa_unit_test_buff_destruct(&send_buff);
+}
+
 /*
  * Check fi_getopt return with different input opt_len
  */
