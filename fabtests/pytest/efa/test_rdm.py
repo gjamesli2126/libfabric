@@ -179,6 +179,26 @@ def test_rdm_atomic(cmdline_args, iteration_type, completion_semantic, memory_ty
                             memory_type=memory_type, timeout=1800, fabric="efa")
     test.run()
 
+
+@pytest.mark.pr_ci
+@pytest.mark.functional
+@pytest.mark.parametrize("endpoint_flags", ["", "-U"])
+@pytest.mark.parametrize("completion_type", ["queue", "counter"])
+def test_efa_atomic_write(cmdline_args, endpoint_flags, completion_type):
+    from common import ClientServerTest
+
+    if cmdline_args.server_id == cmdline_args.client_id:
+        pytest.skip("EFA atomic protocol test requires 2 nodes")
+
+    command = "fi_efa_atomic_write"
+    if endpoint_flags:
+        command += " " + endpoint_flags
+
+    test = ClientServerTest(cmdline_args, command, fabric="efa", timeout=300,
+                            completion_type=completion_type)
+    test.run()
+
+
 @pytest.mark.pr_ci
 @pytest.mark.functional
 def test_rdm_tagged_peek(cmdline_args):
