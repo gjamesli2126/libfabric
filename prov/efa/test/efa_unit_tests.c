@@ -85,10 +85,15 @@ static int efa_unit_test_mocks_teardown(void **state)
 #if HAVE_NEURON
 		.neuron_alloc = __real_neuron_alloc,
 #endif
+		.cuda_set_sync_memops = __real_cuda_set_sync_memops,
 #if HAVE_CUDA
 		.ofi_cudaMalloc = __real_ofi_cudaMalloc,
 		.ofi_cuDeviceGet = __real_ofi_cuDeviceGet,
 		.ofi_cuCtxGetCurrent = __real_ofi_cuCtxGetCurrent,
+#if OFI_HAVE_CUDA_CTX_SYNC_MEMOPS
+		.ofi_cuCtxGetFlags = __real_ofi_cuCtxGetFlags,
+		.ofi_cuCtxSetFlags = __real_ofi_cuCtxSetFlags,
+#endif
 		.ofi_cuCtxCreate_v2 = __real_ofi_cuCtxCreate_v2,
 		.ofi_cuCtxDestroy = __real_ofi_cuCtxDestroy,
 		.ofi_cuMemAlloc = __real_ofi_cuMemAlloc,
@@ -432,6 +437,11 @@ int main(void)
 		cmocka_unit_test_setup_teardown(test_efa_hmem_info_p2p_disabled_synapse, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
 		cmocka_unit_test_setup_teardown(test_efa_hmem_info_disable_p2p_cuda, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
 		cmocka_unit_test_setup_teardown(test_efa_hmem_info_check_p2p_cuda_ctx_create_destroy_on_memalloc_fail, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
+		cmocka_unit_test_setup_teardown(test_efa_hmem_set_sync_memops_pointer_success, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
+		cmocka_unit_test_setup_teardown(test_efa_hmem_set_sync_memops_pointer_failure, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
+		cmocka_unit_test_setup_teardown(test_efa_hmem_set_sync_memops_context_fallback_success, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
+		cmocka_unit_test_setup_teardown(test_efa_hmem_set_sync_memops_context_get_failure, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
+		cmocka_unit_test_setup_teardown(test_efa_hmem_set_sync_memops_context_fallback_failure, efa_unit_test_hmem_setup, efa_unit_test_hmem_teardown),
 		cmocka_unit_test_setup_teardown(test_efa_srx_min_multi_recv_size, efa_unit_test_mocks_setup, efa_unit_test_mocks_teardown),
 		cmocka_unit_test_setup_teardown(test_efa_srx_cq, efa_unit_test_mocks_setup, efa_unit_test_mocks_teardown),
 		cmocka_unit_test_setup_teardown(test_efa_srx_lock, efa_unit_test_mocks_setup, efa_unit_test_mocks_teardown),

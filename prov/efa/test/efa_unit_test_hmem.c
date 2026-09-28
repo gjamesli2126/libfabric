@@ -194,3 +194,91 @@ void test_efa_hmem_info_check_p2p_cuda_ctx_create_destroy_on_memalloc_fail(void 
 	skip();
 }
 #endif /* HAVE_CUDA */
+
+#if OFI_HAVE_CUDA_CTX_SYNC_MEMOPS
+static void efa_unit_test_expect_pointer_sync_memops(void *ptr,
+						      int result)
+{
+	g_efa_unit_test_mocks.cuda_set_sync_memops =
+		efa_mock_cuda_set_sync_memops_return_mock;
+	expect_value(efa_mock_cuda_set_sync_memops_return_mock, ptr, ptr);
+	will_return(efa_mock_cuda_set_sync_memops_return_mock, result);
+}
+
+void test_efa_hmem_set_sync_memops_pointer_success(void **state)
+{
+	void *ptr = (void *) 0x1234;
+	efa_unit_test_expect_pointer_sync_memops(ptr, FI_SUCCESS);
+	assert_int_equal(efa_hmem_set_sync_memops(ptr), FI_SUCCESS);
+}
+
+void test_efa_hmem_set_sync_memops_pointer_failure(void **state)
+{
+	void *ptr = (void *) 0x1234;
+	efa_unit_test_expect_pointer_sync_memops(ptr, -FI_EINVAL);
+	assert_int_equal(efa_hmem_set_sync_memops(ptr), -FI_EINVAL);
+}
+
+void test_efa_hmem_set_sync_memops_context_fallback_success(void **state)
+{
+	void *ptr = (void *) 0x1234;
+	efa_unit_test_expect_pointer_sync_memops(ptr, -FI_EOPNOTSUPP);
+	g_efa_unit_test_mocks.ofi_cuCtxGetFlags = efa_mock_ofi_cuCtxGetFlags_return_mock;
+	will_return(efa_mock_ofi_cuCtxGetFlags_return_mock, CU_CTX_SCHED_YIELD);
+	will_return(efa_mock_ofi_cuCtxGetFlags_return_mock, CUDA_SUCCESS);
+	g_efa_unit_test_mocks.ofi_cuCtxSetFlags = efa_mock_ofi_cuCtxSetFlags_return_mock;
+	expect_value(efa_mock_ofi_cuCtxSetFlags_return_mock, flags, CU_CTX_SCHED_YIELD | CU_CTX_SYNC_MEMOPS);
+	will_return(efa_mock_ofi_cuCtxSetFlags_return_mock, CUDA_SUCCESS);
+	assert_int_equal(efa_hmem_set_sync_memops(ptr), FI_SUCCESS);
+}
+
+void test_efa_hmem_set_sync_memops_context_get_failure(void **state)
+{
+	void *ptr = (void *) 0x1234;
+	efa_unit_test_expect_pointer_sync_memops(ptr, -FI_EOPNOTSUPP);
+	g_efa_unit_test_mocks.ofi_cuCtxGetFlags = efa_mock_ofi_cuCtxGetFlags_return_mock;
+	will_return(efa_mock_ofi_cuCtxGetFlags_return_mock, 0);
+	will_return(efa_mock_ofi_cuCtxGetFlags_return_mock, CUDA_ERROR_INVALID_CONTEXT);
+	assert_int_equal(efa_hmem_set_sync_memops(ptr), -FI_EINVAL);
+}
+
+void test_efa_hmem_set_sync_memops_context_fallback_failure(void **state)
+{
+	void *ptr = (void *) 0x1234;
+
+	efa_unit_test_expect_pointer_sync_memops(ptr, -FI_EOPNOTSUPP);
+	g_efa_unit_test_mocks.ofi_cuCtxGetFlags = efa_mock_ofi_cuCtxGetFlags_return_mock;
+	will_return(efa_mock_ofi_cuCtxGetFlags_return_mock, 0);
+	will_return(efa_mock_ofi_cuCtxGetFlags_return_mock, CUDA_SUCCESS);
+	g_efa_unit_test_mocks.ofi_cuCtxSetFlags = efa_mock_ofi_cuCtxSetFlags_return_mock;
+	expect_value(efa_mock_ofi_cuCtxSetFlags_return_mock, flags, CU_CTX_SYNC_MEMOPS);
+	will_return(efa_mock_ofi_cuCtxSetFlags_return_mock, CUDA_ERROR_NOT_SUPPORTED);
+
+	assert_int_equal(efa_hmem_set_sync_memops(ptr), -FI_EINVAL);
+}
+#else
+void test_efa_hmem_set_sync_memops_pointer_success(void **state)
+{
+	skip();
+}
+
+void test_efa_hmem_set_sync_memops_pointer_failure(void **state)
+{
+	skip();
+}
+
+void test_efa_hmem_set_sync_memops_context_fallback_success(void **state)
+{
+	skip();
+}
+
+void test_efa_hmem_set_sync_memops_context_get_failure(void **state)
+{
+	skip();
+}
+
+void test_efa_hmem_set_sync_memops_context_fallback_failure(void **state)
+{
+	skip();
+}
+#endif
