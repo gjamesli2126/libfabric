@@ -8,6 +8,8 @@
 #include "efa_wr.h"
 #include "rdm/efa_rdm_cq.h"
 #include "rdm/efa_rdm_pkt_type.h"
+#include "rdm/protocols/efa_rdm_proto_eager.h"
+#include "rdm/protocols/efa_rdm_proto_eager_write.h"
 
 #define EFA_FABRIC_PREFIX "EFA-"
 #define EFA_DOMAIN_CAPS (FI_LOCAL_COMM | FI_REMOTE_COMM)
@@ -682,6 +684,12 @@ int efa_prov_info_alloc_for_rdm(struct fi_info **prov_info_rdm_ptr,
 		} else {
 			prov_info_rdm->tx_attr->inject_size = min_pkt_size;
 		}
+		prov_info_rdm->tx_attr->inject_size = MIN(
+			prov_info_rdm->tx_attr->inject_size,
+			efa_rdm_proto_eager.bounds[FI_HMEM_SYSTEM].max);
+		prov_info_rdm->tx_attr->inject_size = MIN(
+			prov_info_rdm->tx_attr->inject_size,
+			efa_rdm_proto_eager_write.bounds[FI_HMEM_SYSTEM].max);
 
 		/*
 		 * EFA RDM endpoint support multiple IOV by segmentation.

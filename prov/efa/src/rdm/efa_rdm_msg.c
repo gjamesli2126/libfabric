@@ -22,6 +22,9 @@
 #include "efa_mr.h"
 #include "efa_rdm_proto.h"
 #include "protocols/efa_rdm_proto_eager.h"
+#include "protocols/efa_rdm_proto_longcts.h"
+#include "protocols/efa_rdm_proto_longread.h"
+#include "protocols/efa_rdm_proto_medium.h"
 #include "protocols/efa_rdm_proto_zero_copy.h"
 #include "efa_rdm_tracepoint.h"
 
@@ -108,31 +111,31 @@ int efa_rdm_msg_select_rtm(struct efa_rdm_ep *efa_rdm_ep, struct efa_rdm_ope *tx
 	if (efa_rdm_pkt_type_is_runtread(readbase_rtm))
 		readbase_rtm = EFA_RDM_LONGREAD_MSGRTM_PKT + tagged;
 
-	/* Respect FI_EFA_RDM_FORCE_SEND_PROTO and select the right protocol */
-	if (efa_env.rdm_force_send_proto) {
-		if (!strcmp(efa_env.rdm_force_send_proto, "eager"))
-			return eager_rtm;
-		if (!strcmp(efa_env.rdm_force_send_proto, "medium"))
-			return medium_rtm;
-		if (!strcmp(efa_env.rdm_force_send_proto, "longcts"))
-			return longcts_rtm;
-		if (!strcmp(efa_env.rdm_force_send_proto, "longread"))
-			return readbase_rtm;
-	}
-
-	if (use_p2p &&
-	    txe->total_len >= g_efa_hmem_info[iface].min_read_msg_size &&
+	if (efa_rdm_proto_msg_size_in_bounds(
+		    &efa_rdm_proto_longread, iface, txe->total_len) &&
+	    !(txe->fi_flags & FI_INJECT) &&
+	    use_p2p &&
 	    efa_rdm_interop_rdma_read(efa_rdm_ep, txe->peer) &&
 	    (txe->desc[0] || efa_is_cache_available(efa_rdm_ep_rdm_domain(efa_rdm_ep))))
 		return readbase_rtm;
 
-	if (txe->total_len <= eager_rtm_max_data_size)
+	if (efa_rdm_proto_msg_size_in_bounds(
+		    &efa_rdm_proto_eager, iface, txe->total_len) &&
+	    txe->total_len <= eager_rtm_max_data_size)
 		return eager_rtm;
 
-	if (txe->total_len <= g_efa_hmem_info[iface].max_medium_msg_size)
+	if (txe->fi_flags & FI_INJECT)
+		return -FI_EOPNOTSUPP;
+
+	if (efa_rdm_proto_msg_size_in_bounds(
+		    &efa_rdm_proto_medium, iface, txe->total_len))
 		return medium_rtm;
 
-	return longcts_rtm;
+	if (efa_rdm_proto_msg_size_in_bounds(
+		    &efa_rdm_proto_longcts, iface, txe->total_len))
+		return longcts_rtm;
+
+	return -FI_EOPNOTSUPP;
 }
 
 /**
@@ -292,6 +295,8 @@ ssize_t efa_rdm_msg_post_rtm(struct efa_rdm_ep *ep, struct efa_rdm_ope *txe)
 	use_p2p = err;
 
 	rtm_type = efa_rdm_msg_select_rtm(ep, txe, use_p2p);
+	if (rtm_type < 0)
+		return rtm_type;
 	assert(rtm_type >= EFA_RDM_REQ_PKT_BEGIN);
 	txe->req_pkt_type = rtm_type;
 

@@ -194,7 +194,11 @@ ssize_t efa_rdm_rma_post_read(struct efa_rdm_ep *ep, struct efa_rdm_ope *txe)
 		/* Use a registered read protocol if one applies. */
 		efa_rdm_proto_select_emulated_read_protocol(ep, txe->peer, txe,
 							    &proto);
-		assert(proto && "No emulated read protocol was selected for the transfer");
+		if (OFI_UNLIKELY(!proto)) {
+			EFA_WARN(FI_LOG_EP_DATA,
+				 "No emulated read protocol was selected for the transfer\n");
+			return -FI_EOPNOTSUPP;
+		}
 		ret = efa_rdm_rma_post_read_proto(ep, txe, proto);
 	}
 
@@ -400,19 +404,14 @@ ssize_t efa_rdm_rma_read(struct fid_ep *ep, void *buf, size_t len, void *desc,
  * @brief Determine if an emulated write should use the read based protocol.
  *
  * The peer RDMA-reads the source buffer, so this requires local p2p, a read
- * capable peer, a large enough transfer, and a registrable source buffer.
+ * capable peer and a registrable source buffer.
  */
 bool efa_rdm_rma_should_write_using_longread(struct efa_rdm_ep *ep,
 					     struct efa_rdm_ope *txe,
 					     struct efa_rdm_peer *peer,
 					     bool use_p2p)
 {
-	int iface = txe->desc[0] ?
-			((struct efa_mr *) txe->desc[0])->iface :
-			FI_HMEM_SYSTEM;
-
 	return use_p2p &&
-	       txe->total_len >= g_efa_hmem_info[iface].min_read_write_size &&
 	       efa_rdm_interop_rdma_read(ep, peer) &&
 	       (txe->desc[0] || efa_is_cache_available(efa_rdm_ep_rdm_domain(ep)));
 }

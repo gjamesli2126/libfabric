@@ -2588,6 +2588,7 @@ int efa_rdm_ope_process_queued_ope(struct efa_rdm_ope *ope)
 	int ret = 0;
 	bool release_atomic_response = false;
 	bool release_atomic_txe = false;
+	bool release_unposted_txe = false;
 	struct efa_rdm_ep *ep = ope->ep;
 	/*
 	 * Default reason for the error path: a packet-post failure. Overridden
@@ -2656,6 +2657,12 @@ int efa_rdm_ope_process_queued_ope(struct efa_rdm_ope *ope)
 		 * after a non-FI_EAGAIN repost failure, so release it below.
 		 */
 		release_atomic_txe = (ope->type == EFA_RDM_TXE && ope->atomic_proto);
+		release_unposted_txe =
+			flag == EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE &&
+			ope->type == EFA_RDM_TXE &&
+			!efa_rdm_ope_is_peer_abort_capable(ope) &&
+			ope->efa_outstanding_tx_ops == 0 &&
+			dlist_empty(&ope->queued_pkts);
 		release_atomic_response =
 			efa_rdm_ope_is_internal_atomic_response(ope, queued_response_pkt_type);
 		if (ope->type == EFA_RDM_TXE)
@@ -2671,7 +2678,7 @@ int efa_rdm_ope_process_queued_ope(struct efa_rdm_ope *ope)
 	if (flag == EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE)
 		--ep->ope_queued_before_handshake_cnt;
 
-	if (release_atomic_txe) {
+	if (release_atomic_txe || release_unposted_txe) {
 		assert(ope->efa_outstanding_tx_ops == 0);
 		efa_rdm_txe_release(ope);
 	} else if (release_atomic_response) {

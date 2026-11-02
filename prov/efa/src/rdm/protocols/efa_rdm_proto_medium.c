@@ -43,24 +43,57 @@ efa_rdm_proto_medium_handle_matched_rtm(struct efa_rdm_pke *pkt_entry)
 /**
  * @brief Check if the medium protocol can handle this send operation.
  *
- * The medium protocol carries the whole message in REQ packets, so it is only
- * worth using up to the interface's medium threshold (64KB for system memory,
- * and 0 - i.e. never - for every HMEM interface, which use the read based
- * protocols instead).
+ * The medium protocol carries the whole message in REQ packets. A zero sized
+ * message uses eager instead.
  */
+static size_t
+efa_rdm_proto_medium_required_pkt_count(struct efa_rdm_ope *txe,
+					int req_pkt_type,
+					uint16_t header_flags, int iface)
+{
+	size_t pkt_count, max_data_size, data_size, full_pkt_count, remainder;
+	size_t memory_alignment;
+
+	if (!txe->total_len)
+		return 0;
+
+	max_data_size = efa_rdm_proto_max_req_data_capacity(
+		txe->ep, req_pkt_type, header_flags);
+	if (!max_data_size)
+		return 0;
+
+	memory_alignment =
+		efa_rdm_ep_get_memory_alignment(txe->ep, iface);
+	pkt_count = (txe->total_len - 1) / max_data_size + 1;
+	data_size = (txe->total_len - 1) / pkt_count + 1;
+	data_size &= ~(memory_alignment - 1);
+	if (!data_size)
+		return 0;
+
+	full_pkt_count = txe->total_len / data_size;
+	remainder = txe->total_len - full_pkt_count * data_size;
+	return full_pkt_count +
+	       (remainder > max_data_size - data_size ? 1 : 0);
+}
+
 static bool efa_rdm_proto_medium_can_use_for_send(struct efa_rdm_ope *txe,
 						  int req_pkt_type,
 						  uint16_t header_flags,
 						  int iface, bool use_p2p)
 {
-	/* A zero sized message should use eager protocol */
-	assert(txe->total_len > 0);
+	size_t pkt_count = efa_rdm_proto_medium_required_pkt_count(
+		txe, req_pkt_type, header_flags, iface);
 
-	return txe->total_len <= g_efa_hmem_info[iface].max_medium_msg_size;
+	return pkt_count > 0 &&
+	       pkt_count <= MIN(
+		       efa_base_ep_get_tx_pool_size(&txe->ep->base_ep),
+		       txe->ep->efa_max_outstanding_tx_ops);
 }
 
 EFA_RDM_PROTO_DEF(medium,
 	.wants_mr = true,
+	.set_min_bound = &efa_rdm_proto_set_min_bound,
+	.set_max_bound = &efa_rdm_proto_set_max_bound,
 	.can_use_protocol = &efa_rdm_proto_medium_can_use_for_send,
 	.construct_tx_pkes = &efa_rdm_proto_medium_construct_tx_pkes,
 	.req_pkt_type = EFA_RDM_MEDIUM_MSGRTM_PKT,

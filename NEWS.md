@@ -60,6 +60,7 @@ v2.7.0, Fri Sept 18, 2026
 
 ## EFA ##
 
+- Add inclusive per-protocol message-size selection bounds and remove FI_EFA_RDM_FORCE_SEND_PROTO
 - Allow efa-direct without FI_CONTEXT2 for GDA usecase
 - Size the txe pool by what a txe id can index
 - Keep an rxe alive while its local read copies

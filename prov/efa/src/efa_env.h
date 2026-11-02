@@ -13,6 +13,11 @@ enum efa_env_huge_page_setting
 	EFA_ENV_HUGE_PAGE_DISABLED, /**< user explicitly set FI_EFA_USE_HUGE_PAGE to 0/false/off */
 };
 
+struct efa_env_size_override {
+	bool is_set;
+	size_t value;
+};
+
 struct efa_env {
 	char *iface;
 	int tx_min_credits;
@@ -90,19 +95,17 @@ struct efa_env {
 	int strict_mode;
 	int use_hw_cntr;
 	int use_sq_req_id_64_bit;
+	struct efa_env_size_override inter_max_eager_message_size;
+	struct efa_env_size_override inter_max_medium_message_size;
+	struct efa_env_size_override inter_min_read_message_size;
+	struct efa_env_size_override inter_max_eager_write_size;
+	struct efa_env_size_override inter_min_read_write_size;
 	/**
 	 * Enable completion actions (FI_EFA_ENABLE_COMP_ACTION, default 0).
 	 * Left off while the rdma-core and firmware interfaces are still
 	 * changing; when 0 the provider reports no completion action support.
 	 */
 	int enable_comp_action;
-	/**
-	 * Name of the RDM send protocol that selection is pinned to, as set by
-	 * FI_EFA_RDM_FORCE_SEND_PROTO, or NULL to use the default protocol
-	 * selection logic.
-	 * Two-sided sends only; the RMA paths are not affected by this env var.
-	 */
-	char *rdm_force_send_proto;
 	size_t max_queued_copy;
 };
 

@@ -30,16 +30,13 @@
 /**
  * @brief Check if the long CTS read protocol can handle this operation.
  *
- * Long CTS read is the fallback for reads that do not fit in a single response
- * packet, so it always applies once short read has been ruled out.
+ * Long CTS read is the fallback for eligible reads declined by short read.
  */
 static bool efa_rdm_proto_longcts_rtr_can_use(struct efa_rdm_ope *txe,
 					      int req_pkt_type,
 					      uint16_t header_flags, int iface,
 					      bool use_p2p)
 {
-	assert(txe->total_len >=
-	       txe->ep->mtu_size - sizeof(struct efa_rdm_readrsp_hdr));
 	return true;
 }
 
@@ -134,6 +131,9 @@ err:
 
 struct efa_rdm_proto efa_rdm_proto_longcts_rtr = {
 	.name = "longcts_rtr",
+	.bounds = EFA_RDM_PROTO_DEFAULT_BOUNDS,
+	.set_min_bound = &efa_rdm_proto_set_min_bound,
+	.set_max_bound = &efa_rdm_proto_set_bound_unsupported,
 	.can_use_protocol = &efa_rdm_proto_longcts_rtr_can_use,
 	.construct_tx_pkes = &efa_rdm_proto_longcts_rtr_construct_tx_pkes,
 	.post_continuation = &efa_rdm_proto_post_ctsdata,

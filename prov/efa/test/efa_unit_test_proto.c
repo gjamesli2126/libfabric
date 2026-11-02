@@ -12,6 +12,7 @@
 #include "rdm/protocols/efa_rdm_proto_atomic.h"
 #include "rdm/efa_rdm_pke_rtm.h"
 #include "rdm/protocols/efa_rdm_proto_eager.h"
+#include "rdm/protocols/efa_rdm_proto_medium.h"
 #include "rdm/protocols/efa_rdm_proto_runtread.h"
 #include "rdm/protocols/efa_rdm_proto_zero_copy.h"
 #include <errno.h>
@@ -2585,14 +2586,13 @@ void test_proto_atomic_read_responder_accepts_read_only_mr(void **state)
  *
  * Runting has only been qualified for the HMEM interfaces, so host memory has a
  * runt size of 0 by default and would never select the protocol. Overriding the
- * FI_HMEM_SYSTEM thresholds keeps this coverage runnable on an instance with no
- * GPU; efa_unit_test_mocks_teardown() restores g_efa_hmem_info from its backup
- * after every test, so the overrides do not leak.
+ * FI_HMEM_SYSTEM settings keeps this coverage runnable on an instance with no
+ * GPU.
  *
- * The spoofed device generation does have to be put back by hand, via
- * restore_proto_runtread_device_version(), which the caller must call as soon as
- * protocol selection is done -- cmocka longjmps out of a failing assertion, so
- * restoring at the end of a test would leak into every later test.
+ * The spoofed device generation and protocol bounds do have to be put back by
+ * hand via restore_proto_runtread_globals(), which the caller must invoke as
+ * soon as protocol selection is done -- cmocka longjmps out of a failing
+ * assertion, so restoring at the end of a test would leak into later tests.
  *
  * Skips the test on a platform whose device cannot do RDMA read, since the whole
  * protocol is predicated on the receiver reading the tail.
@@ -2601,7 +2601,8 @@ static struct efa_rdm_ep *
 setup_proto_runtread_test(struct efa_resource *resource,
 			  struct efa_unit_test_buff *send_buff,
 			  fi_addr_t *peer_addr, struct efa_rdm_peer **peer,
-			  uint32_t *saved_vendor_part_id)
+			  uint32_t *saved_vendor_part_id,
+			  struct efa_rdm_proto_bounds *saved_runtread_bounds)
 {
 	struct efa_hmem_info *info = &g_efa_hmem_info[FI_HMEM_SYSTEM];
 	struct efa_rdm_ep *ep;
@@ -2629,18 +2630,27 @@ setup_proto_runtread_test(struct efa_resource *resource,
 	ep->use_device_rdma = true;
 
 	info->runt_size = EFA_UNIT_TEST_PROTO_RUNT_SIZE;
-	info->min_read_msg_size = EFA_UNIT_TEST_PROTO_RUNTREAD_LEN;
+	*saved_runtread_bounds =
+		efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM];
+	efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM].min =
+		EFA_UNIT_TEST_PROTO_RUNTREAD_LEN;
 
 	/* The medium protocol is tried first and must decline this size. */
-	assert_true(EFA_UNIT_TEST_PROTO_RUNTREAD_LEN > info->max_medium_msg_size);
+	assert_false(efa_rdm_proto_msg_size_in_bounds(
+		&efa_rdm_proto_medium, FI_HMEM_SYSTEM,
+		EFA_UNIT_TEST_PROTO_RUNTREAD_LEN));
 
 	return ep;
 }
 
-static void restore_proto_runtread_device_version(uint32_t saved_vendor_part_id)
+static void restore_proto_runtread_globals(
+	uint32_t saved_vendor_part_id,
+	const struct efa_rdm_proto_bounds *saved_runtread_bounds)
 {
 	g_efa_selected_device_list[0].ibv_attr.vendor_part_id =
 		saved_vendor_part_id;
+	efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM] =
+		*saved_runtread_bounds;
 }
 
 /**
@@ -2657,12 +2667,14 @@ void test_proto_select_runtread_for_large_msg(void **state)
 	struct efa_rdm_proto *proto = NULL;
 	fi_addr_t peer_addr;
 	uint32_t saved_vendor_part_id;
+	struct efa_rdm_proto_bounds saved_runtread_bounds;
 	struct fi_msg msg = {0};
 	struct iovec iov;
 	int err;
 
 	ep = setup_proto_runtread_test(resource, &send_buff, &peer_addr, &peer,
-				       &saved_vendor_part_id);
+				       &saved_vendor_part_id,
+				       &saved_runtread_bounds);
 
 	iov.iov_base = send_buff.buff;
 	iov.iov_len = send_buff.size;
@@ -2674,7 +2686,8 @@ void test_proto_select_runtread_for_large_msg(void **state)
 
 	err = efa_rdm_proto_select_send_protocol(ep, peer, &msg, ofi_op_msg, 0,
 						 txe, &proto);
-	restore_proto_runtread_device_version(saved_vendor_part_id);
+	restore_proto_runtread_globals(saved_vendor_part_id,
+				      &saved_runtread_bounds);
 
 	assert_int_equal(err, 0);
 	assert_non_null(proto);
@@ -2704,6 +2717,7 @@ void test_proto_runtread_construct_pkes_carries_read_iov(void **state)
 	struct efa_rdm_runtread_rtm_base_hdr *rtm_hdr;
 	fi_addr_t peer_addr;
 	uint32_t saved_vendor_part_id;
+	struct efa_rdm_proto_bounds saved_runtread_bounds;
 	struct fi_msg msg = {0};
 	struct iovec iov;
 	size_t i, expected_offset = 0;
@@ -2711,7 +2725,8 @@ void test_proto_runtread_construct_pkes_carries_read_iov(void **state)
 	int err;
 
 	ep = setup_proto_runtread_test(resource, &send_buff, &peer_addr, &peer,
-				       &saved_vendor_part_id);
+				       &saved_vendor_part_id,
+				       &saved_runtread_bounds);
 
 	iov.iov_base = send_buff.buff;
 	iov.iov_len = send_buff.size;
@@ -2731,7 +2746,8 @@ void test_proto_runtread_construct_pkes_carries_read_iov(void **state)
 	txe->msg_id = peer->next_msg_id++;
 
 	err = proto->construct_tx_pkes(ep, txe, &pke_send_flags);
-	restore_proto_runtread_device_version(saved_vendor_part_id);
+	restore_proto_runtread_globals(saved_vendor_part_id,
+				      &saved_runtread_bounds);
 	assert_int_equal(err, 0);
 
 	/*

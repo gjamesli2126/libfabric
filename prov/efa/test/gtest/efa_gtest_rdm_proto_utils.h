@@ -139,23 +139,78 @@ int efa_test_proto_peer_abort_prov_errno(void);
 /** @brief EFA_RDM_MEDIUM_MSGRTM_PKT, whose enum is not includable from C++. */
 int efa_test_proto_medium_msgrtm_pkt_type(void);
 
-struct efa_test_proto_force_result {
+struct efa_test_proto_bound_window {
+	size_t min;
+	size_t max;
+};
+
+struct efa_test_proto_bounds_case {
+	size_t len;
+	uint64_t flags;
+	struct efa_test_proto_bound_window eager;
+	struct efa_test_proto_bound_window medium;
+	struct efa_test_proto_bound_window runtread;
+	struct efa_test_proto_bound_window longread;
+	struct efa_test_proto_bound_window longcts;
+	int construct;
+};
+
+enum efa_test_proto_bound_setter {
+	EFA_TEST_PROTO_SET_MEDIUM_MIN,
+	EFA_TEST_PROTO_SET_MEDIUM_MAX,
+	EFA_TEST_PROTO_SET_EAGER_MIN,
+};
+
+struct efa_test_proto_set_bound_case {
+	enum efa_test_proto_bound_setter setter;
+	int iface;
+	size_t initial_min;
+	size_t initial_max;
+	size_t value;
+};
+
+struct efa_test_proto_set_bound_result {
 	ssize_t ret;
+	size_t min;
+	size_t max;
+};
+
+struct efa_test_proto_select_result {
+	ssize_t ret;
+	ssize_t construct_ret;
+	size_t payload_size;
+	size_t total_len;
 	/** Name of the protocol selection picked, empty when it picked none. */
 	char proto_name[32];
 };
 
+/** @brief Apply one protocol bound setter and report its resulting window. */
+int efa_test_proto_set_bound(
+	const struct efa_test_proto_set_bound_case *test_case,
+	struct efa_test_proto_set_bound_result *out);
+
+/** @brief One-past-last HMEM interface value for invalid-iface testing. */
+int efa_test_proto_invalid_hmem_iface(void);
+
 /**
- * @brief Select a send protocol for a @p len byte host message with
- * FI_EFA_RDM_FORCE_SEND_PROTO set to @p forced.
+ * @brief Select a send protocol using temporary host-memory bounds.
  *
- * @param[in]	forced	FI_EFA_RDM_FORCE_SEND_PROTO value, NULL for unset
  * @return	0 if @p out was filled, negative on setup failure
  */
-int efa_test_proto_force_select_send(struct fid_ep *ep, struct fid_av *av,
-				     struct fid_domain *domain,
-				     const char *forced, size_t len,
-				     struct efa_test_proto_force_result *out);
+int efa_test_proto_bounds_select_send(
+	struct fid_ep *ep, struct fid_av *av, struct fid_domain *domain,
+	const struct efa_test_proto_bounds_case *test_case,
+	struct efa_test_proto_select_result *out);
+
+/** @brief Select between emulated write protocols after eager-write handoff. */
+int efa_test_proto_select_emulated_write(struct fid_ep *ep, struct fid_av *av,
+					 struct fid_domain *domain, uint64_t flags,
+					 struct efa_test_proto_select_result *out);
+
+/** @brief Select between emulated read protocols after short-RTR handoff. */
+int efa_test_proto_select_emulated_read(struct fid_ep *ep, struct fid_av *av,
+					int make_gap,
+					struct efa_test_proto_select_result *out);
 
 #define EFA_TEST_PROTO_LARGE_LEN 131072
 #define EFA_TEST_PROTO_RUNT_SIZE 32768
@@ -167,19 +222,13 @@ int efa_test_proto_large_len_beyond_medium(struct fid_ep *ep);
 int efa_test_proto_device_supports_rdma_read(void);
 
 /**
- * @brief Save the host hmem thresholds and the device generation that the read
+ * @brief Save the host read settings and device generation that the read
  * protocol tests override.
  */
 void efa_test_proto_save_globals(void);
 
 /** @brief Restore what efa_test_proto_save_globals() saved. */
 void efa_test_proto_restore_globals(void);
-
-struct efa_test_proto_select_result {
-	ssize_t ret;
-	/** Name of the protocol selection picked, empty when it picked none. */
-	char proto_name[32];
-};
 
 /**
  * @brief Select a send protocol for an EFA_TEST_PROTO_LARGE_LEN byte host

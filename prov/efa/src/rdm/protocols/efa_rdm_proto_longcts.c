@@ -125,6 +125,8 @@ static bool efa_rdm_proto_longcts_can_use_for_send(struct efa_rdm_ope *txe,
 
 EFA_RDM_PROTO_DEF(longcts,
 	.wants_mr = true,
+	.set_min_bound = &efa_rdm_proto_set_min_bound,
+	.set_max_bound = &efa_rdm_proto_set_bound_unsupported,
 	.can_use_protocol = &efa_rdm_proto_longcts_can_use_for_send,
 	.construct_tx_pkes = &efa_rdm_proto_longcts_construct_req_pke,
 	.post_continuation = &efa_rdm_proto_post_ctsdata,
@@ -251,9 +253,10 @@ int efa_rdm_proto_longcts_construct_req_pke(struct efa_rdm_ep *ep,
 		iface = txe->desc[0] ? ((struct efa_mr *) txe->desc[0])->iface :
 				       FI_HMEM_SYSTEM;
 		memory_alignment = efa_rdm_ep_get_memory_alignment(ep, iface);
-		rtm_payload_size = (ep->mtu_size - hdr_size) &
+		assert(txe->total_len > 0);
+		rtm_payload_size = MIN(ep->mtu_size - hdr_size,
+				       txe->total_len - 1) &
 				   ~(memory_alignment - 1);
-		assert(rtm_payload_size > 0);
 		/* The REQ holds only part of the message. */
 		assert(rtm_payload_size < txe->total_len);
 	}

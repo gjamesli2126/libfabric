@@ -16,10 +16,15 @@
 #include "rdm/efa_rdm_pkt_type.h"
 #include "rdm/efa_rdm_proto.h"
 #include "rdm/protocols/efa_rdm_proto_eager.h"
+#include "rdm/protocols/efa_rdm_proto_eager_write.h"
 #include "rdm/protocols/efa_rdm_proto_longcts.h"
+#include "rdm/protocols/efa_rdm_proto_longcts_rtr.h"
+#include "rdm/protocols/efa_rdm_proto_longcts_write.h"
 #include "rdm/protocols/efa_rdm_proto_longread.h"
+#include "rdm/protocols/efa_rdm_proto_longread_write.h"
 #include "rdm/protocols/efa_rdm_proto_medium.h"
 #include "rdm/protocols/efa_rdm_proto_runtread.h"
+#include "rdm/protocols/efa_rdm_proto_short_rtr.h"
 #include "rdm/efa_rdm_protocol.h"
 #include <rdma/fi_errno.h>
 #include <stdlib.h>
@@ -64,6 +69,10 @@ static struct efa_rdm_ep *efa_test_proto_ep(struct fid_ep *ep)
 {
 	return container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 }
+
+static void efa_test_proto_copy_name(char *dst, size_t size,
+				     struct efa_rdm_proto *proto);
+static void efa_test_proto_release_send_pkes(struct efa_rdm_ep *ep);
 
 static size_t efa_test_proto_ope_list_count(struct efa_rdm_ep *ep)
 {
@@ -149,7 +158,8 @@ int efa_test_proto_medium_len_in_band(struct fid_ep *ep, size_t len)
 	struct efa_rdm_ep *efa_rdm_ep = efa_test_proto_ep(ep);
 
 	return len > efa_rdm_ep->mtu_size &&
-	       len <= g_efa_hmem_info[FI_HMEM_SYSTEM].max_medium_msg_size;
+	       efa_rdm_proto_msg_size_in_bounds(
+		       &efa_rdm_proto_medium, FI_HMEM_SYSTEM, len);
 }
 
 int efa_test_proto_peer_abort_prov_errno(void)
@@ -162,19 +172,79 @@ int efa_test_proto_medium_msgrtm_pkt_type(void)
 	return EFA_RDM_MEDIUM_MSGRTM_PKT;
 }
 
-int efa_test_proto_force_select_send(struct fid_ep *ep_fid, struct fid_av *av,
-				     struct fid_domain *domain,
-				     const char *forced, size_t len,
-				     struct efa_test_proto_force_result *out)
+static void efa_test_proto_set_bounds(
+	struct efa_rdm_proto *proto, enum fi_hmem_iface iface,
+	const struct efa_test_proto_bound_window *window)
+{
+	proto->bounds[iface].min = window->min;
+	proto->bounds[iface].max = window->max;
+}
+
+int efa_test_proto_set_bound(
+	const struct efa_test_proto_set_bound_case *test_case,
+	struct efa_test_proto_set_bound_result *out)
+{
+	struct efa_rdm_proto_bounds saved_medium;
+	struct efa_rdm_proto_bounds saved_eager;
+	struct efa_rdm_proto *proto;
+	int (*setter)(struct efa_rdm_proto *, enum fi_hmem_iface, size_t);
+
+	memset(out, 0, sizeof(*out));
+	saved_medium = efa_rdm_proto_medium.bounds[FI_HMEM_SYSTEM];
+	saved_eager = efa_rdm_proto_eager.bounds[FI_HMEM_SYSTEM];
+
+	switch (test_case->setter) {
+	case EFA_TEST_PROTO_SET_MEDIUM_MIN:
+		proto = &efa_rdm_proto_medium;
+		setter = proto->set_min_bound;
+		break;
+	case EFA_TEST_PROTO_SET_MEDIUM_MAX:
+		proto = &efa_rdm_proto_medium;
+		setter = proto->set_max_bound;
+		break;
+	case EFA_TEST_PROTO_SET_EAGER_MIN:
+		proto = &efa_rdm_proto_eager;
+		setter = proto->set_min_bound;
+		break;
+	default:
+		return -FI_EINVAL;
+	}
+
+	proto->bounds[FI_HMEM_SYSTEM].min = test_case->initial_min;
+	proto->bounds[FI_HMEM_SYSTEM].max = test_case->initial_max;
+	out->ret = setter(proto, (enum fi_hmem_iface) test_case->iface,
+			  test_case->value);
+	out->min = proto->bounds[FI_HMEM_SYSTEM].min;
+	out->max = proto->bounds[FI_HMEM_SYSTEM].max;
+
+	efa_rdm_proto_medium.bounds[FI_HMEM_SYSTEM] = saved_medium;
+	efa_rdm_proto_eager.bounds[FI_HMEM_SYSTEM] = saved_eager;
+	return 0;
+}
+
+int efa_test_proto_invalid_hmem_iface(void)
+{
+	return OFI_HMEM_MAX;
+}
+
+int efa_test_proto_bounds_select_send(
+	struct fid_ep *ep_fid, struct fid_av *av, struct fid_domain *domain,
+	const struct efa_test_proto_bounds_case *test_case,
+	struct efa_test_proto_select_result *out)
 {
 	struct efa_test_proto_ctx ctx = {0};
 	struct efa_rdm_proto *proto = NULL;
-	struct efa_rdm_ope txe;
+	struct efa_rdm_proto_bounds saved_eager;
+	struct efa_rdm_proto_bounds saved_medium;
+	struct efa_rdm_proto_bounds saved_runtread;
+	struct efa_rdm_proto_bounds saved_longread;
+	struct efa_rdm_proto_bounds saved_longcts;
+	struct efa_rdm_ope *txe;
 	struct fi_msg msg = {0};
 	struct iovec iov;
-	char *saved_forced;
 	void *desc;
-	int err;
+	uint64_t pke_send_flags;
+	int err, filled = 0;
 
 	memset(out, 0, sizeof(*out));
 
@@ -183,30 +253,70 @@ int efa_test_proto_force_select_send(struct fid_ep *ep_fid, struct fid_av *av,
 		return err;
 
 	/* A zero length message still needs a registered buffer to describe. */
-	err = efa_test_proto_setup_buf(domain, &ctx, len ? len : 1);
+	err = efa_test_proto_setup_buf(domain, &ctx,
+				       test_case->len ? test_case->len : 1);
 	if (err)
 		return err;
 
+	txe = ofi_buf_alloc(ctx.ep->base_ep.txe_pool);
+	if (!txe) {
+		efa_test_proto_teardown_buf(&ctx);
+		return -FI_ENOMEM;
+	}
+
 	desc = fi_mr_desc(ctx.mr);
 	iov.iov_base = ctx.buf;
-	iov.iov_len = len;
+	iov.iov_len = test_case->len;
 	msg.msg_iov = &iov;
 	msg.desc = &desc;
 	msg.iov_count = 1;
 	msg.addr = ctx.peer_addr;
 
 	/* The selector fills the rest of this txe itself. */
-	memset(&txe, 0, sizeof(txe));
-	txe.op = ofi_op_msg;
-	txe.peer = ctx.peer;
+	memset(txe, 0, sizeof(*txe));
+	txe->op = ofi_op_msg;
+	txe->peer = ctx.peer;
 
-	saved_forced = efa_env.rdm_force_send_proto;
-	efa_env.rdm_force_send_proto = (char *) forced;
+	saved_eager = efa_rdm_proto_eager.bounds[FI_HMEM_SYSTEM];
+	saved_medium = efa_rdm_proto_medium.bounds[FI_HMEM_SYSTEM];
+	saved_runtread = efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM];
+	saved_longread = efa_rdm_proto_longread.bounds[FI_HMEM_SYSTEM];
+	saved_longcts = efa_rdm_proto_longcts.bounds[FI_HMEM_SYSTEM];
+
+	efa_test_proto_set_bounds(&efa_rdm_proto_eager, FI_HMEM_SYSTEM,
+				  &test_case->eager);
+	efa_test_proto_set_bounds(&efa_rdm_proto_medium, FI_HMEM_SYSTEM,
+				  &test_case->medium);
+	efa_test_proto_set_bounds(&efa_rdm_proto_runtread, FI_HMEM_SYSTEM,
+				  &test_case->runtread);
+	efa_test_proto_set_bounds(&efa_rdm_proto_longread, FI_HMEM_SYSTEM,
+				  &test_case->longread);
+	efa_test_proto_set_bounds(&efa_rdm_proto_longcts, FI_HMEM_SYSTEM,
+				  &test_case->longcts);
 
 	out->ret = efa_rdm_proto_select_send_protocol(
-		ctx.ep, ctx.peer, &msg, ofi_op_msg, 0, &txe, &proto);
+		ctx.ep, ctx.peer, &msg, ofi_op_msg, test_case->flags, txe,
+		&proto);
+	if (!out->ret && proto && test_case->construct) {
+		efa_rdm_proto_txe_fill(txe, ctx.ep, ctx.peer, &msg, ofi_op_msg,
+				       0, test_case->flags, 0, proto);
+		filled = 1;
+		txe->msg_id = ctx.peer->next_msg_id++;
+		out->construct_ret = proto->construct_tx_pkes(
+			ctx.ep, txe, &pke_send_flags);
+		out->total_len = txe->total_len;
+		if (!out->construct_ret) {
+			out->payload_size =
+				ctx.ep->send_pkt_entry_vec[0]->payload_size;
+			efa_test_proto_release_send_pkes(ctx.ep);
+		}
+	}
 
-	efa_env.rdm_force_send_proto = saved_forced;
+	efa_rdm_proto_eager.bounds[FI_HMEM_SYSTEM] = saved_eager;
+	efa_rdm_proto_medium.bounds[FI_HMEM_SYSTEM] = saved_medium;
+	efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM] = saved_runtread;
+	efa_rdm_proto_longread.bounds[FI_HMEM_SYSTEM] = saved_longread;
+	efa_rdm_proto_longcts.bounds[FI_HMEM_SYSTEM] = saved_longcts;
 
 	/* Leave proto_name empty when selection picked nothing. */
 	if (proto) {
@@ -215,7 +325,147 @@ int efa_test_proto_force_select_send(struct fid_ep *ep_fid, struct fid_av *av,
 		out->proto_name[sizeof(out->proto_name) - 1] = '\0';
 	}
 
+	if (filled)
+		efa_rdm_txe_release(txe);
+	else
+		ofi_buf_free(txe);
 	efa_test_proto_teardown_buf(&ctx);
+	return 0;
+}
+
+int efa_test_proto_select_emulated_write(
+	struct fid_ep *ep_fid, struct fid_av *av, struct fid_domain *domain,
+	uint64_t flags,
+	struct efa_test_proto_select_result *out)
+{
+	const size_t len = 1024;
+	struct efa_test_proto_ctx ctx = {0};
+	struct efa_rdm_proto_bounds saved_eager_write;
+	struct efa_rdm_proto_bounds saved_longread_write;
+	struct efa_rdm_proto_bounds saved_longcts_write;
+	struct efa_rdm_proto *proto = NULL;
+	struct efa_rdm_ope *txe;
+	struct fi_msg msg = {0};
+	struct iovec iov;
+	void *desc;
+	uint64_t pke_send_flags;
+	int err;
+
+	memset(out, 0, sizeof(*out));
+
+	err = efa_test_proto_setup_peer(ep_fid, av, &ctx);
+	if (err)
+		return err;
+
+	err = efa_test_proto_setup_buf(domain, &ctx, len);
+	if (err)
+		return err;
+
+	txe = ofi_buf_alloc(ctx.ep->base_ep.txe_pool);
+	if (!txe) {
+		efa_test_proto_teardown_buf(&ctx);
+		return -FI_ENOMEM;
+	}
+
+	desc = fi_mr_desc(ctx.mr);
+	iov.iov_base = ctx.buf;
+	iov.iov_len = len;
+	msg.msg_iov = &iov;
+	msg.desc = &desc;
+	msg.iov_count = 1;
+	msg.addr = ctx.peer_addr;
+	efa_rdm_txe_construct(txe, ctx.ep, ctx.peer, &msg, ofi_op_write,
+			      flags, 0);
+	txe->rma_iov_count = 1;
+	txe->rma_iov[0].addr = (uintptr_t) ctx.buf;
+	txe->rma_iov[0].len = len;
+	txe->rma_iov[0].key = 0;
+
+	saved_eager_write =
+		efa_rdm_proto_eager_write.bounds[FI_HMEM_SYSTEM];
+	saved_longread_write =
+		efa_rdm_proto_longread_write.bounds[FI_HMEM_SYSTEM];
+	saved_longcts_write =
+		efa_rdm_proto_longcts_write.bounds[FI_HMEM_SYSTEM];
+
+	efa_rdm_proto_eager_write.bounds[FI_HMEM_SYSTEM] =
+		(struct efa_rdm_proto_bounds) {0, len - 1};
+	efa_rdm_proto_longread_write.bounds[FI_HMEM_SYSTEM] =
+		(struct efa_rdm_proto_bounds) {len + 1, SIZE_MAX};
+	efa_rdm_proto_longcts_write.bounds[FI_HMEM_SYSTEM] =
+		(struct efa_rdm_proto_bounds) {0, SIZE_MAX};
+
+	efa_rdm_proto_select_emulated_write_protocol(
+		ctx.ep, ctx.peer, txe, false, &proto);
+	efa_test_proto_copy_name(out->proto_name, sizeof(out->proto_name),
+				 proto);
+	if (proto) {
+		out->construct_ret = proto->construct_tx_pkes(
+			ctx.ep, txe, &pke_send_flags);
+		out->total_len = txe->total_len;
+		if (!out->construct_ret) {
+			out->payload_size =
+				ctx.ep->send_pkt_entry_vec[0]->payload_size;
+			efa_test_proto_release_send_pkes(ctx.ep);
+		}
+	}
+
+	efa_rdm_proto_eager_write.bounds[FI_HMEM_SYSTEM] =
+		saved_eager_write;
+	efa_rdm_proto_longread_write.bounds[FI_HMEM_SYSTEM] =
+		saved_longread_write;
+	efa_rdm_proto_longcts_write.bounds[FI_HMEM_SYSTEM] =
+		saved_longcts_write;
+	efa_rdm_txe_release(txe);
+	efa_test_proto_teardown_buf(&ctx);
+	return 0;
+}
+
+int efa_test_proto_select_emulated_read(
+	struct fid_ep *ep_fid, struct fid_av *av, int make_gap,
+	struct efa_test_proto_select_result *out)
+{
+	const size_t len = 64;
+	struct efa_test_proto_ctx ctx = {0};
+	struct efa_rdm_proto_bounds saved_short_rtr;
+	struct efa_rdm_proto_bounds saved_longcts_rtr;
+	struct efa_rdm_proto *proto = NULL;
+	struct efa_rdm_ope txe = {0};
+	int err;
+
+	memset(out, 0, sizeof(*out));
+
+	err = efa_test_proto_setup_peer(ep_fid, av, &ctx);
+	if (err)
+		return err;
+
+	txe.ep = ctx.ep;
+	txe.peer = ctx.peer;
+	txe.op = ofi_op_read_req;
+	txe.total_len = len;
+	txe.iov_count = 1;
+	txe.rma_iov_count = 1;
+
+	saved_short_rtr =
+		efa_rdm_proto_short_rtr.bounds[FI_HMEM_SYSTEM];
+	saved_longcts_rtr =
+		efa_rdm_proto_longcts_rtr.bounds[FI_HMEM_SYSTEM];
+
+	efa_rdm_proto_short_rtr.bounds[FI_HMEM_SYSTEM] =
+		(struct efa_rdm_proto_bounds) {0, len - 1};
+	efa_rdm_proto_longcts_rtr.bounds[FI_HMEM_SYSTEM] =
+		(struct efa_rdm_proto_bounds) {
+			make_gap ? len + 1 : 0, SIZE_MAX
+		};
+
+	efa_rdm_proto_select_emulated_read_protocol(
+		ctx.ep, ctx.peer, &txe, &proto);
+	efa_test_proto_copy_name(out->proto_name, sizeof(out->proto_name),
+				 proto);
+
+	efa_rdm_proto_short_rtr.bounds[FI_HMEM_SYSTEM] = saved_short_rtr;
+	efa_rdm_proto_longcts_rtr.bounds[FI_HMEM_SYSTEM] =
+		saved_longcts_rtr;
 	return 0;
 }
 
@@ -610,6 +860,8 @@ out:
 }
 
 static struct efa_hmem_info efa_test_proto_saved_system_hmem_info;
+static struct efa_rdm_proto_bounds efa_test_proto_saved_runtread_bounds;
+static struct efa_rdm_proto_bounds efa_test_proto_saved_longread_bounds;
 static uint32_t efa_test_proto_saved_vendor_part_id;
 
 int efa_test_proto_large_len_beyond_medium(struct fid_ep *ep)
@@ -617,8 +869,9 @@ int efa_test_proto_large_len_beyond_medium(struct fid_ep *ep)
 	struct efa_rdm_ep *efa_rdm_ep = efa_test_proto_ep(ep);
 
 	return EFA_TEST_PROTO_LARGE_LEN > efa_rdm_ep->mtu_size &&
-	       EFA_TEST_PROTO_LARGE_LEN >
-		       g_efa_hmem_info[FI_HMEM_SYSTEM].max_medium_msg_size;
+	       !efa_rdm_proto_msg_size_in_bounds(
+		       &efa_rdm_proto_medium, FI_HMEM_SYSTEM,
+		       EFA_TEST_PROTO_LARGE_LEN);
 }
 
 int efa_test_proto_device_supports_rdma_read(void)
@@ -629,6 +882,10 @@ int efa_test_proto_device_supports_rdma_read(void)
 void efa_test_proto_save_globals(void)
 {
 	efa_test_proto_saved_system_hmem_info = g_efa_hmem_info[FI_HMEM_SYSTEM];
+	efa_test_proto_saved_runtread_bounds =
+		efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM];
+	efa_test_proto_saved_longread_bounds =
+		efa_rdm_proto_longread.bounds[FI_HMEM_SYSTEM];
 	if (g_efa_selected_device_cnt > 0)
 		efa_test_proto_saved_vendor_part_id =
 			g_efa_selected_device_list[0].ibv_attr.vendor_part_id;
@@ -637,6 +894,10 @@ void efa_test_proto_save_globals(void)
 void efa_test_proto_restore_globals(void)
 {
 	g_efa_hmem_info[FI_HMEM_SYSTEM] = efa_test_proto_saved_system_hmem_info;
+	efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM] =
+		efa_test_proto_saved_runtread_bounds;
+	efa_rdm_proto_longread.bounds[FI_HMEM_SYSTEM] =
+		efa_test_proto_saved_longread_bounds;
 	if (g_efa_selected_device_cnt > 0)
 		g_efa_selected_device_list[0].ibv_attr.vendor_part_id =
 			efa_test_proto_saved_vendor_part_id;
@@ -653,7 +914,14 @@ static void efa_test_proto_enable_read(struct efa_test_proto_ctx *ctx,
 	ctx->ep->use_device_rdma = true;
 
 	info->runt_size = runt_size;
-	info->min_read_msg_size = EFA_TEST_PROTO_LARGE_LEN;
+	efa_rdm_proto_runtread.bounds[FI_HMEM_SYSTEM] =
+		(struct efa_rdm_proto_bounds) {
+			EFA_TEST_PROTO_LARGE_LEN, SIZE_MAX
+		};
+	efa_rdm_proto_longread.bounds[FI_HMEM_SYSTEM] =
+		(struct efa_rdm_proto_bounds) {
+			EFA_TEST_PROTO_LARGE_LEN, SIZE_MAX
+		};
 }
 
 static int efa_test_proto_setup(struct fid_ep *ep, struct fid_av *av,

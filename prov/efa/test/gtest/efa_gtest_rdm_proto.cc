@@ -324,16 +324,88 @@ TEST_F(EfaRdmProtoMediumCompletionTest, peer_abort_completes_txe_once)
 	EXPECT_EQ(res.final_prov_errno, efa_test_proto_peer_abort_prov_errno());
 }
 
-struct EfaRdmProtoForceCase {
+struct EfaRdmProtoSetBoundCase {
 	const char *name;
-	/* FI_EFA_RDM_FORCE_SEND_PROTO, nullptr when unset. */
-	const char *forced;
-	size_t len;
-	/* Protocol expected, nullptr when the send must fail instead. */
+	struct efa_test_proto_set_bound_case input;
+	ssize_t expected_ret;
+	size_t expected_min;
+	size_t expected_max;
+};
+
+class EfaRdmProtoSetBoundTest : public TestWithParam<EfaRdmProtoSetBoundCase>
+{};
+
+TEST_P(EfaRdmProtoSetBoundTest, update_or_reject)
+{
+	const EfaRdmProtoSetBoundCase &c = GetParam();
+	struct efa_test_proto_set_bound_result res = {};
+
+	ASSERT_EQ(efa_test_proto_set_bound(&c.input, &res), 0);
+	EXPECT_EQ(res.ret, c.expected_ret);
+	EXPECT_EQ(res.min, c.expected_min);
+	EXPECT_EQ(res.max, c.expected_max);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+	, EfaRdmProtoSetBoundTest,
+	Values(
+		EfaRdmProtoSetBoundCase{
+			"min_zero",
+			{EFA_TEST_PROTO_SET_MEDIUM_MIN, FI_HMEM_SYSTEM, 1,
+			 SIZE_MAX, 0},
+			0, 0, SIZE_MAX},
+		EfaRdmProtoSetBoundCase{
+			"max_zero",
+			{EFA_TEST_PROTO_SET_MEDIUM_MAX, FI_HMEM_SYSTEM, 0,
+			 64, 0},
+			0, 0, 0},
+		EfaRdmProtoSetBoundCase{
+			"max_size_max",
+			{EFA_TEST_PROTO_SET_MEDIUM_MAX, FI_HMEM_SYSTEM, 0,
+			 64, SIZE_MAX},
+			0, 0, SIZE_MAX},
+		EfaRdmProtoSetBoundCase{
+			"min_equal_max",
+			{EFA_TEST_PROTO_SET_MEDIUM_MIN, FI_HMEM_SYSTEM, 0,
+			 64, 64},
+			0, 64, 64},
+		EfaRdmProtoSetBoundCase{
+			"same_value",
+			{EFA_TEST_PROTO_SET_MEDIUM_MAX, FI_HMEM_SYSTEM, 0,
+			 64, 64},
+			0, 0, 64},
+		EfaRdmProtoSetBoundCase{
+			"min_above_max",
+			{EFA_TEST_PROTO_SET_MEDIUM_MIN, FI_HMEM_SYSTEM, 0,
+			 63, 64},
+			-FI_EINVAL, 0, 63},
+		EfaRdmProtoSetBoundCase{
+			"max_below_min",
+			{EFA_TEST_PROTO_SET_MEDIUM_MAX, FI_HMEM_SYSTEM, 64,
+			 SIZE_MAX, 63},
+			-FI_EINVAL, 64, SIZE_MAX},
+		EfaRdmProtoSetBoundCase{
+			"unsupported_direction",
+			{EFA_TEST_PROTO_SET_EAGER_MIN, FI_HMEM_SYSTEM, 7,
+			 99, 8},
+			-FI_EOPNOTSUPP, 7, 99},
+		EfaRdmProtoSetBoundCase{
+			"invalid_iface",
+			{EFA_TEST_PROTO_SET_MEDIUM_MIN,
+			 efa_test_proto_invalid_hmem_iface(), 7, 99, 8},
+			-FI_EINVAL, 7, 99}),
+	[](const testing::TestParamInfo<EfaRdmProtoSetBoundCase> &info) {
+		return std::string(info.param.name);
+	});
+
+struct EfaRdmProtoBoundsCase {
+	const char *name;
+	struct efa_test_proto_bounds_case input;
+	ssize_t expected_ret;
 	const char *expected_proto;
 };
 
-class EfaRdmProtoForceTest : public TestWithParam<EfaRdmProtoForceCase>
+class EfaRdmProtoBoundsTest : public TestWithParam<EfaRdmProtoBoundsCase>
 {
 	protected:
 	struct efa_resource resource = {};
@@ -353,59 +425,138 @@ class EfaRdmProtoForceTest : public TestWithParam<EfaRdmProtoForceCase>
 	}
 };
 
-/**
- * @brief FI_EFA_RDM_FORCE_SEND_PROTO replaces the size decision with a name
- * match, so the named protocol is selected whether or not the size suits it,
- * and a name no registered protocol answers to fails the send.
- *
- * Overriding the size decision is the point: no threshold can steer a message
- * that fits in one packet away from eager, which claims it first.
- */
-TEST_P(EfaRdmProtoForceTest, forced_name_replaces_the_size_decision)
+TEST_P(EfaRdmProtoBoundsTest, inclusive_first_match_or_gap)
 {
-	const EfaRdmProtoForceCase &c = GetParam();
-	struct efa_test_proto_force_result res = {};
+	const EfaRdmProtoBoundsCase &c = GetParam();
+	struct efa_test_proto_select_result res = {};
 
-	ASSERT_EQ(efa_test_proto_force_select_send(resource.ep, resource.av,
-						   resource.domain, c.forced,
-						   c.len, &res),
+	ASSERT_EQ(efa_test_proto_bounds_select_send(
+			  resource.ep, resource.av, resource.domain, &c.input,
+			  &res),
 		  0);
-
-	// TODO: after all protocols are migrated, protocol selection should
-	// fail with -FI_EINVAL
-	if (!c.expected_proto) {
-		EXPECT_EQ(res.ret, FI_SUCCESS);
-		EXPECT_STREQ(res.proto_name, "");
-		return;
-	}
-
-	ASSERT_EQ(res.ret, 0);
+	EXPECT_EQ(res.ret, c.expected_ret);
 	EXPECT_STREQ(res.proto_name, c.expected_proto);
+	if (c.input.construct) {
+		ASSERT_EQ(res.construct_ret, 0);
+		EXPECT_LT(res.payload_size, res.total_len);
+	}
 }
 
 INSTANTIATE_TEST_SUITE_P(
-	, EfaRdmProtoForceTest,
-	Values(EfaRdmProtoForceCase{"unset_picks_eager", nullptr, 64, "eager"},
-	       EfaRdmProtoForceCase{"eager_picks_eager", "eager", 64, "eager"},
-	       EfaRdmProtoForceCase{"medium_beats_eager", "medium", 64, "medium"},
-	       /* Both of these decline under can_use_protocol(). */
-	       EfaRdmProtoForceCase{"eager_ignores_multi_packet_size", "eager",
-				    EFA_TEST_PROTO_MEDIUM_LEN, "eager"},
-	       EfaRdmProtoForceCase{"medium_ignores_zero_length", "medium", 0,
-				    "medium"},
-	       /* A read protocol's predicate would decline a 64 byte send. */
-	       EfaRdmProtoForceCase{"runtread_picks_runtread", "runtread", 64,
-				    "runtread"},
-	       EfaRdmProtoForceCase{"longread_picks_longread", "longread", 64,
-				    "longread"},
-	       EfaRdmProtoForceCase{"longcts_picks_longcts", "longcts", 64,
-				    "longcts"},
-	       /* A write protocol's name is not a send protocol's name. */
-	       EfaRdmProtoForceCase{"eager_write_fails", "eager_write", 64,
-				    nullptr},
-	       EfaRdmProtoForceCase{"unknown_name_fails", "no_such_proto", 64,
-				    nullptr}),
-	[](const testing::TestParamInfo<EfaRdmProtoForceCase> &info) {
+	, EfaRdmProtoBoundsTest,
+	Values(
+		EfaRdmProtoBoundsCase{
+			"zero_at_eager_max",
+			{0, 0, {0, 0}, {1, SIZE_MAX}, {1, SIZE_MAX},
+			 {1, SIZE_MAX}, {1, SIZE_MAX}},
+			0, "eager"},
+		EfaRdmProtoBoundsCase{
+			"eager_max_and_overlap",
+			{64, 0, {0, 64}, {0, SIZE_MAX}, {65, SIZE_MAX},
+			 {65, SIZE_MAX}, {0, SIZE_MAX}},
+			0, "eager"},
+		EfaRdmProtoBoundsCase{
+			"medium_min",
+			{64, 0, {0, 63}, {64, SIZE_MAX}, {65, SIZE_MAX},
+			 {65, SIZE_MAX}, {0, SIZE_MAX}},
+			0, "medium"},
+		EfaRdmProtoBoundsCase{
+			"gap",
+			{64, 0, {0, 63}, {65, SIZE_MAX}, {65, SIZE_MAX},
+			 {65, SIZE_MAX}, {65, SIZE_MAX}},
+			-FI_EOPNOTSUPP, ""},
+		EfaRdmProtoBoundsCase{
+			"inject_cannot_fall_through",
+			{64, FI_INJECT, {0, 63}, {0, SIZE_MAX},
+			 {0, SIZE_MAX}, {0, SIZE_MAX}, {0, SIZE_MAX}},
+			-FI_EOPNOTSUPP, ""},
+		EfaRdmProtoBoundsCase{
+			"eager_intrinsic_limit",
+			{EFA_TEST_PROTO_MEDIUM_LEN, 0, {0, SIZE_MAX},
+			 {0, SIZE_MAX}, {SIZE_MAX, SIZE_MAX},
+			 {SIZE_MAX, SIZE_MAX}, {0, SIZE_MAX}},
+			0, "medium"},
+		EfaRdmProtoBoundsCase{
+			"longcts_early_handoff_construct",
+			{1024, 0, {0, 1023}, {0, 1023},
+			 {1025, SIZE_MAX}, {1025, SIZE_MAX},
+			 {0, SIZE_MAX}, 1},
+			0, "longcts"}),
+	[](const testing::TestParamInfo<EfaRdmProtoBoundsCase> &info) {
+		return std::string(info.param.name);
+	});
+
+enum EfaRdmProtoEmulatedKind {
+	EFA_RDM_PROTO_EMULATED_WRITE,
+	EFA_RDM_PROTO_EMULATED_READ,
+};
+
+struct EfaRdmProtoEmulatedCase {
+	const char *name;
+	enum EfaRdmProtoEmulatedKind kind;
+	uint64_t flags;
+	int make_gap;
+	const char *expected_proto;
+};
+
+class EfaRdmProtoEmulatedTest :
+	public TestWithParam<EfaRdmProtoEmulatedCase>
+{
+	protected:
+	struct efa_resource resource = {};
+
+	void SetUp() override
+	{
+		memset(&resource, 0, sizeof(resource));
+		efa_test_resource_construct(
+			&resource, efa_test_alloc_default_hints(
+					   FI_EP_RDM, EFA_FABRIC_NAME));
+		ASSERT_NE(resource.ep, nullptr);
+	}
+
+	void TearDown() override
+	{
+		efa_test_resource_destruct(&resource);
+	}
+};
+
+TEST_P(EfaRdmProtoEmulatedTest, early_handoff_gap_or_inject)
+{
+	const EfaRdmProtoEmulatedCase &c = GetParam();
+	struct efa_test_proto_select_result res = {};
+	int ret;
+
+	if (c.kind == EFA_RDM_PROTO_EMULATED_WRITE)
+		ret = efa_test_proto_select_emulated_write(
+			resource.ep, resource.av, resource.domain, c.flags, &res);
+	else
+		ret = efa_test_proto_select_emulated_read(
+			resource.ep, resource.av, c.make_gap, &res);
+
+	ASSERT_EQ(ret, 0);
+	EXPECT_STREQ(res.proto_name, c.expected_proto);
+	if (c.kind == EFA_RDM_PROTO_EMULATED_WRITE &&
+	    c.expected_proto[0]) {
+		ASSERT_EQ(res.construct_ret, 0);
+		EXPECT_LT(res.payload_size, res.total_len);
+	}
+}
+
+INSTANTIATE_TEST_SUITE_P(
+	, EfaRdmProtoEmulatedTest,
+	Values(
+		EfaRdmProtoEmulatedCase{
+			"write_early_handoff", EFA_RDM_PROTO_EMULATED_WRITE,
+			0, 0, "longcts_write"},
+		EfaRdmProtoEmulatedCase{
+			"write_inject_gap", EFA_RDM_PROTO_EMULATED_WRITE,
+			FI_INJECT, 0, ""},
+		EfaRdmProtoEmulatedCase{
+			"read_early_handoff", EFA_RDM_PROTO_EMULATED_READ,
+			0, 0, "longcts_rtr"},
+		EfaRdmProtoEmulatedCase{
+			"read_gap", EFA_RDM_PROTO_EMULATED_READ, 0, 1, ""}),
+	[](const testing::TestParamInfo<EfaRdmProtoEmulatedCase> &info) {
 		return std::string(info.param.name);
 	});
 

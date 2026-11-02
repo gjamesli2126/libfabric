@@ -18,16 +18,166 @@
 #include "protocols/efa_rdm_proto_short_rtr.h"
 #include "efa_rdm_msg.h"
 
+static bool efa_rdm_proto_iface_is_valid(enum fi_hmem_iface iface)
+{
+	return (int) iface >= 0 && iface < OFI_HMEM_MAX;
+}
+
+int efa_rdm_proto_set_min_bound(struct efa_rdm_proto *proto,
+				enum fi_hmem_iface iface, size_t value)
+{
+	if (!proto || !efa_rdm_proto_iface_is_valid(iface))
+		return -FI_EINVAL;
+
+	if (value > proto->bounds[iface].max)
+		return -FI_EINVAL;
+
+	proto->bounds[iface].min = value;
+	return FI_SUCCESS;
+}
+
+int efa_rdm_proto_set_max_bound(struct efa_rdm_proto *proto,
+				enum fi_hmem_iface iface, size_t value)
+{
+	if (!proto || !efa_rdm_proto_iface_is_valid(iface))
+		return -FI_EINVAL;
+
+	if (value < proto->bounds[iface].min)
+		return -FI_EINVAL;
+
+	proto->bounds[iface].max = value;
+	return FI_SUCCESS;
+}
+
+int efa_rdm_proto_set_bound_unsupported(struct efa_rdm_proto *proto,
+					enum fi_hmem_iface iface, size_t value)
+{
+	(void) value;
+
+	if (!proto || !efa_rdm_proto_iface_is_valid(iface))
+		return -FI_EINVAL;
+
+	return -FI_EOPNOTSUPP;
+}
+
+#if HAVE_CUDA || HAVE_NEURON || HAVE_ROCR
+static size_t efa_rdm_proto_max_eager_msg_size_with_largest_header(void)
+{
+	assert(g_efa_selected_device_list);
+	return g_efa_selected_device_list[0].ibv_port_attr.max_msg_sz -
+	       efa_rdm_pkt_type_get_max_hdr_size();
+}
+#else
+static size_t efa_rdm_proto_max_eager_msg_size_with_largest_header(void)
+{
+	return 0;
+}
+#endif
+
+static void
+efa_rdm_proto_set_bounds(struct efa_rdm_proto *proto,
+			 enum fi_hmem_iface iface, size_t min, size_t max)
+{
+	proto->bounds[iface].min = min;
+	proto->bounds[iface].max = max;
+}
+
+static void
+efa_rdm_proto_apply_bound_override(
+	struct efa_rdm_proto *proto, enum fi_hmem_iface iface,
+	const struct efa_env_size_override *override,
+	int (*setter)(struct efa_rdm_proto *, enum fi_hmem_iface, size_t))
+{
+	struct efa_rdm_proto_bounds defaults = proto->bounds[iface];
+	int ret;
+
+	if (!override->is_set)
+		return;
+
+	ret = setter(proto, iface, override->value);
+	if (ret) {
+		proto->bounds[iface] = defaults;
+		EFA_WARN(FI_LOG_CORE,
+			 "Ignoring rejected bound override %zu for %s on %s\n",
+			 override->value, proto->name,
+			 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+	}
+}
+
+int efa_rdm_proto_init_bounds_for_iface(enum fi_hmem_iface target_iface, enum fi_hmem_iface policy_iface){
+	size_t medium_max, read_min, read_write_min;
+
+	if (!efa_rdm_proto_iface_is_valid(target_iface) ||
+	    !efa_rdm_proto_iface_is_valid(policy_iface))
+		return -FI_EINVAL;
+
+	switch (policy_iface) {
+	case FI_HMEM_SYSTEM:
+		medium_max = EFA_DEFAULT_INTER_MAX_MEDIUM_MESSAGE_SIZE;
+		read_min = EFA_DEFAULT_INTER_MIN_READ_MESSAGE_SIZE;
+		read_write_min = EFA_DEFAULT_INTER_MIN_READ_WRITE_SIZE;
+		break;
+	case FI_HMEM_CUDA:
+	case FI_HMEM_ROCR:
+	case FI_HMEM_ZE:
+	case FI_HMEM_NEURON:
+		medium_max = 0;
+		read_min =
+			efa_rdm_proto_max_eager_msg_size_with_largest_header() + 1;
+		read_write_min = read_min;
+		break;
+	case FI_HMEM_SYNAPSEAI:
+		medium_max = 0;
+		read_min = 0;
+		read_write_min = 1;
+		break;
+	default:
+		return -FI_EINVAL;
+	}
+
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_eager, target_iface, 0, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_medium, target_iface, 0, medium_max);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_runtread, target_iface, read_min, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_longread, target_iface, read_min, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_longcts, target_iface, 0, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_eager_write, target_iface, 0, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_longread_write, target_iface, read_write_min, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_longcts_write, target_iface, 0, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_short_rtr, target_iface, 0, SIZE_MAX);
+	efa_rdm_proto_set_bounds(&efa_rdm_proto_longcts_rtr, target_iface, 0, SIZE_MAX);
+
+	if (policy_iface == FI_HMEM_SYNAPSEAI)
+		return FI_SUCCESS;
+
+	efa_rdm_proto_apply_bound_override(&efa_rdm_proto_eager, target_iface,
+		&efa_env.inter_max_eager_message_size,
+		efa_rdm_proto_eager.set_max_bound);
+	if (policy_iface == FI_HMEM_SYSTEM)
+		efa_rdm_proto_apply_bound_override(&efa_rdm_proto_medium, target_iface,
+			&efa_env.inter_max_medium_message_size,
+			efa_rdm_proto_medium.set_max_bound);
+	efa_rdm_proto_apply_bound_override(&efa_rdm_proto_runtread, target_iface,
+		&efa_env.inter_min_read_message_size,
+		efa_rdm_proto_runtread.set_min_bound);
+	efa_rdm_proto_apply_bound_override(&efa_rdm_proto_longread, target_iface,
+		&efa_env.inter_min_read_message_size,
+		efa_rdm_proto_longread.set_min_bound);
+	efa_rdm_proto_apply_bound_override(&efa_rdm_proto_eager_write, target_iface,
+		&efa_env.inter_max_eager_write_size,
+		efa_rdm_proto_eager_write.set_max_bound);
+	efa_rdm_proto_apply_bound_override(&efa_rdm_proto_longread_write, target_iface,
+		&efa_env.inter_min_read_write_size,
+		efa_rdm_proto_longread_write.set_min_bound);
+
+	return FI_SUCCESS;
+}
+
 /**
  * @brief Undo the memory registrations the selection loop made.
  *
  * efa_rdm_ope_try_fill_desc() registers the source buffer so a read based
- * protocol can be evaluated. When no protocol is selected the caller falls back
- * to the legacy send path, whose efa_rdm_txe_construct() clears txe->mr without
- * closing it, so nothing would ever release those registrations. Hand them back
- * here instead.
- *
- * TODO: Remove after all protocols are migrated to the new code path
+ * protocol can be evaluated. Hand those registrations back when no protocol
+ * can carry the operation.
  */
 static void efa_rdm_proto_release_selection_mrs(struct efa_rdm_ope *txe)
 {
@@ -212,63 +362,38 @@ int efa_rdm_proto_select_send_protocol(struct efa_rdm_ep *ep,
 		return err;
 	use_p2p = err;
 	mr_access_flags = FI_SEND | (use_p2p ? FI_REMOTE_READ : 0);
+	header_flags = efa_rdm_proto_req_header_flags(peer, effective_flags);
 
 	/* Synapse AI only supports long read */
 	if (iface == FI_HMEM_SYNAPSEAI) {
+		selected_proto = &efa_rdm_proto_longread;
+		req_pkt_type = efa_rdm_proto_req_pkt_type(
+			selected_proto, op, effective_flags, peer);
+
+		if ((effective_flags & FI_INJECT) ||
+		    !efa_rdm_proto_msg_size_in_bounds(
+			    selected_proto, iface, txe->total_len))
+			goto no_match;
+
 		if (efa_is_cache_available(efa_rdm_ep_rdm_domain(ep)))
 			efa_rdm_ope_try_fill_desc(txe, 0, mr_access_flags);
 
-		*proto = &efa_rdm_proto_longread;
-		txe->proto = &efa_rdm_proto_longread;
-		txe->req_pkt_type = efa_rdm_proto_req_pkt_type(
-			&efa_rdm_proto_longread, op, effective_flags, peer);
-		return FI_SUCCESS;
-	}
-
-	header_flags = efa_rdm_proto_req_header_flags(peer, effective_flags);
-
-	/*
-	 * FI_EFA_RDM_FORCE_SEND_PROTO pins the choice to one protocol by name.
-	 * The name replaces the size decision rather than narrowing it, so the
-	 * named protocol is used whether or not this message suits it; that is
-	 * the point, since no threshold can steer a message that fits in a
-	 * single packet away from eager.
-	 */
-	if (efa_env.rdm_force_send_proto) {
-		for (int i = 0; i < ARRAY_SIZE(efa_rdm_protocols); ++i) {
-			selected_proto = efa_rdm_protocols[i];
-
-			if (strcmp(efa_env.rdm_force_send_proto,
-				   selected_proto->name))
-				continue;
-
-			if (selected_proto->wants_mr &&
-			    efa_is_cache_available(efa_rdm_ep_rdm_domain(ep)))
-				efa_rdm_ope_try_fill_desc(
-					txe, 0, mr_access_flags);
-
-			*proto = selected_proto;
-			txe->proto = selected_proto;
-			txe->req_pkt_type = efa_rdm_proto_req_pkt_type(
-				selected_proto, op, effective_flags, peer);
-			EFA_INFO(FI_LOG_EP_DATA,
-				"Forced the %s protocol for a %zu byte send\n",
-				selected_proto->name, txe->total_len);
-			return FI_SUCCESS;
-		}
-
-		// TODO: fail the send operation after all protocols are migrated.
-		EFA_WARN(FI_LOG_EP_DATA,
-			 "FI_EFA_RDM_FORCE_SEND_PROTO=%s does not name a send protocol "
-			 "that supports the new code path. Falling back to the old code "
-			 "path\n", efa_env.rdm_force_send_proto);
-		*proto = NULL;
-		txe->proto = NULL;
+		*proto = selected_proto;
+		txe->proto = selected_proto;
+		txe->req_pkt_type = req_pkt_type;
 		return FI_SUCCESS;
 	}
 
 	for (int i = 0; i < ARRAY_SIZE(efa_rdm_protocols); ++i) {
 		selected_proto = efa_rdm_protocols[i];
+
+		if (!efa_rdm_proto_msg_size_in_bounds(
+			    selected_proto, iface, txe->total_len))
+			continue;
+
+		if ((effective_flags & FI_INJECT) &&
+		    selected_proto != &efa_rdm_proto_eager)
+			continue;
 
 		req_pkt_type = efa_rdm_proto_req_pkt_type(
 			selected_proto, op, effective_flags, peer);
@@ -301,16 +426,13 @@ int efa_rdm_proto_select_send_protocol(struct efa_rdm_ep *ep,
 		}
 	}
 
-	/*
-	 * No protocol matched, so release any MRs that were registered
-	 * TODO: Remove after all protocols moved to new code path
-	 */
+no_match:
 	if (mr_attempted)
 		efa_rdm_proto_release_selection_mrs(txe);
 
 	*proto = NULL;
 	txe->proto = NULL;
-	return FI_SUCCESS;
+	return -FI_EOPNOTSUPP;
 }
 
 /* Utility funcions */
@@ -360,6 +482,14 @@ void efa_rdm_proto_select_emulated_write_protocol(struct efa_rdm_ep *ep,
 
 	for (i = 0; i < ARRAY_SIZE(efa_rdm_emulated_write_protocols); ++i) {
 		selected_proto = efa_rdm_emulated_write_protocols[i];
+
+		if (!efa_rdm_proto_msg_size_in_bounds(
+			    selected_proto, iface, txe->total_len))
+			continue;
+
+		if ((txe->fi_flags & FI_INJECT) &&
+		    selected_proto != &efa_rdm_proto_eager_write)
+			continue;
 
 		req_pkt_type = efa_rdm_proto_req_pkt_type(
 			selected_proto, txe->op, txe->fi_flags, peer);
@@ -420,6 +550,10 @@ void efa_rdm_proto_select_emulated_read_protocol(struct efa_rdm_ep *ep,
 	for (i = 0; i < ARRAY_SIZE(efa_rdm_emulated_read_protocols); ++i) {
 		selected_proto = efa_rdm_emulated_read_protocols[i];
 
+		if (!efa_rdm_proto_msg_size_in_bounds(
+			    selected_proto, iface, txe->total_len))
+			continue;
+
 		req_pkt_type = efa_rdm_proto_req_pkt_type(
 			selected_proto, txe->op, txe->fi_flags, peer);
 
@@ -434,8 +568,7 @@ void efa_rdm_proto_select_emulated_read_protocol(struct efa_rdm_ep *ep,
 	}
 
 	/*
-	 * No emulated read protocol matched. This is not expected; the caller
-	 * asserts that a protocol was selected.
+	 * No emulated read protocol matched. The caller reports an error.
 	 */
 	*proto = NULL;
 	txe->proto = NULL;

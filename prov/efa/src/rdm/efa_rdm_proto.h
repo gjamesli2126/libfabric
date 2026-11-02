@@ -39,8 +39,9 @@
  * The TX send path works as follows:
  *
  * 1. efa_rdm_proto_select_send_protocol() iterates through the protocol
- *    registry (efa_rdm_protocols[]) in priority order, calling
- *    can_use_protocol() on each. The first match is selected.
+ *    registry (efa_rdm_protocols[]) in priority order, checking the message
+ *    size bounds and then calling can_use_protocol() on each. The first match
+ *    is selected.
  *    Some fields (e.g. MR descriptor) are required by multiple protocols.
  *    Instead of repeating the calculations for those fields, some fields in
  *    txe are populated at this stage. The remaining fields are populated
@@ -62,6 +63,11 @@
  * restrictive (long CTS) so the most efficient protocol is always
  * selected.
  */
+struct efa_rdm_proto_bounds {
+	size_t min;
+	size_t max;
+};
+
 struct efa_rdm_proto {
 	/* Human readable protocol name, e.g. "eager". Used for tracing the
 	 * outcome of protocol selection and in unit test assertions.
@@ -71,6 +77,13 @@ struct efa_rdm_proto {
 	/* Bool set to true if this protocol benefits from the source buffer
 	 * being registered */
 	bool wants_mr;
+
+	struct efa_rdm_proto_bounds bounds[OFI_HMEM_MAX];
+
+	int (*set_min_bound)(struct efa_rdm_proto *proto,
+			     enum fi_hmem_iface iface, size_t value);
+	int (*set_max_bound)(struct efa_rdm_proto *proto,
+			     enum fi_hmem_iface iface, size_t value);
 
 	/* TX path handlers */
 
@@ -131,24 +144,47 @@ struct efa_rdm_proto {
 	int req_pkt_type_tagged_dc;
 };
 
+#define EFA_RDM_PROTO_DEFAULT_BOUNDS \
+	{ \
+		{ 0, SIZE_MAX }, { 0, SIZE_MAX }, { 0, SIZE_MAX }, \
+		{ 0, SIZE_MAX }, { 0, SIZE_MAX }, { 0, SIZE_MAX }, \
+	}
+
 #define EFA_RDM_PROTO_DEF(_name, ...) \
 	struct efa_rdm_proto efa_rdm_proto_##_name = { \
 		.name = #_name, \
+		.bounds = EFA_RDM_PROTO_DEFAULT_BOUNDS, \
 		__VA_ARGS__ \
 	}
+
+int efa_rdm_proto_set_min_bound(struct efa_rdm_proto *proto,
+				enum fi_hmem_iface iface, size_t value);
+int efa_rdm_proto_set_max_bound(struct efa_rdm_proto *proto,
+				enum fi_hmem_iface iface, size_t value);
+int efa_rdm_proto_set_bound_unsupported(struct efa_rdm_proto *proto,
+					enum fi_hmem_iface iface, size_t value);
+int efa_rdm_proto_init_bounds_for_iface(enum fi_hmem_iface target_iface,
+					enum fi_hmem_iface policy_iface);
+
+static inline bool
+efa_rdm_proto_msg_size_in_bounds(const struct efa_rdm_proto *proto,
+				 enum fi_hmem_iface iface, size_t len)
+{
+	return (int) iface >= 0 && iface < OFI_HMEM_MAX &&
+	       len >= proto->bounds[iface].min &&
+	       len <= proto->bounds[iface].max;
+}
 
 /**
  * @brief Select the appropriate send protocol for a TX operation.
  *
- * Iterates through registered protocols in priority order and selects
- * the first one whose can_use_protocol() returns true.
+ * Iterates through registered protocols in priority order and selects the first
+ * one whose inclusive bounds contain the message size and whose
+ * can_use_protocol() returns true.
  *
  * It will also handle memory registration of user buffers. If read based
  * protocols are appropriate but MR fails, it will automatically switch to a
  * different protocol.
- *
- * FI_EFA_RDM_FORCE_SEND_PROTO forces the use of a given protocol selected by
- * name.
  *
  * @param[in]  ep     Endpoint
  * @param[in]  peer   Peer to send to
@@ -157,11 +193,7 @@ struct efa_rdm_proto {
  * @param[in]  flags  Operation flags (FI_INJECT, FI_DELIVERY_COMPLETE, etc.)
  * @param[out] txe    Pre-allocated TXE, partially initialized on return
  * @param[out] proto  Selected protocol, or NULL if none matched
- * @return 0 on success, negative errno if the operation cannot be carried at
- *	   all. Finding no protocol by size is not a failure : it returns 0 with
-       *proto NULL, and the caller falls back to the old send path.
- *     TODO: Fail send operation when FI_EFA_RDM_FORCE_SEND_PROTO is set but
- *     does not match any of the implemented protocols.
+ * @return 0 on success, negative errno if the operation cannot be carried.
  */
 int efa_rdm_proto_select_send_protocol(struct efa_rdm_ep *ep,
 				       struct efa_rdm_peer *peer,

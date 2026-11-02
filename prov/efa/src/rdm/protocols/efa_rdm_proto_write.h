@@ -38,6 +38,9 @@ ssize_t efa_rdm_proto_write_rtw_pke_init_common(struct efa_rdm_pke *pkt_entry,
 
 	hdr_size = efa_rdm_pke_get_req_hdr_size(pkt_entry);
 	data_size = MIN(txe->ep->mtu_size - hdr_size, txe->total_len);
+	if (efa_rdm_pkt_type_is_longcts_req(pkt_entry->wiredata[0]) &&
+	    data_size == txe->total_len && data_size)
+		data_size--;
 	return efa_rdm_pke_init_payload_from_ope(pkt_entry, txe, hdr_size, 0, data_size);
 }
 

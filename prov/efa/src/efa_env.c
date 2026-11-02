@@ -48,9 +48,12 @@ struct efa_env efa_env = {
 	.use_hw_cntr = 1,
 	.use_sq_req_id_64_bit = 1,
 	.enable_comp_action = 0,
-	.rdm_force_send_proto = NULL,
 	.max_queued_copy = EFA_RDM_MAX_QUEUED_COPY,
 };
+
+static void efa_env_param_get_size_override(const char *name, struct efa_env_size_override *override){
+	override->is_set = fi_param_get_size_t(&efa_prov, name, &override->value) == FI_SUCCESS;
+}
 
 /**
  * @brief Read environment variables that are not registered via fi_param_define
@@ -160,6 +163,16 @@ void efa_env_param_get(void)
 			 &efa_env.efa_cq_read_size);
 	fi_param_get_size_t(&efa_prov, "shm_cq_read_size",
 			 &efa_env.shm_cq_read_size);
+	efa_env_param_get_size_override("inter_max_eager_message_size",
+		&efa_env.inter_max_eager_message_size);
+	efa_env_param_get_size_override("inter_max_medium_message_size",
+		&efa_env.inter_max_medium_message_size);
+	efa_env_param_get_size_override("inter_min_read_message_size",
+		&efa_env.inter_min_read_message_size);
+	efa_env_param_get_size_override("inter_max_eager_write_size",
+		&efa_env.inter_max_eager_write_size);
+	efa_env_param_get_size_override("inter_min_read_write_size",
+		&efa_env.inter_min_read_write_size);
 	fi_param_get_size_t(&efa_prov, "inter_read_segment_size",
 			    &efa_env.efa_read_segment_size);
 	fi_param_get_size_t(&efa_prov, "inter_max_gdrcopy_from_hmem_size",
@@ -183,16 +196,6 @@ void efa_env_param_get(void)
 	 */
 	if (efa_env.strict_mode)
 		efa_env.track_mr = 1;
-
-	fi_param_get_str(&efa_prov, "rdm_force_send_proto",
-			 &efa_env.rdm_force_send_proto);
-	/*
-	 * An empty value is how the application can clear the variable.
-	 * So leave the field NULL when the string is empty.
-	 * NULL then means that we should not force the protocol at all.
-	 */
-	if (efa_env.rdm_force_send_proto && !*efa_env.rdm_force_send_proto)
-		efa_env.rdm_force_send_proto = NULL;
 
 	fi_param_get_size_t(&efa_prov, "max_queued_copy",
 			    &efa_env.max_queued_copy);
@@ -262,14 +265,18 @@ void efa_env_define()
 			"Set the number of EFA completion entries to read for one loop for one iteration of the progress engine. (Default: 50)");
 	fi_param_define(&efa_prov, "shm_cq_read_size", FI_PARAM_SIZE_T,
 			"Set the number of SHM completion entries to read for one loop for one iteration of the progress engine. (Default: 50)");
-	fi_param_define(&efa_prov, "inter_max_medium_message_size", FI_PARAM_INT,
-			"The maximum message size for inter EFA medium message protocol (Default 65536).");
-	fi_param_define(&efa_prov, "inter_min_read_message_size", FI_PARAM_INT,
-			"The minimum message size in bytes for inter EFA read message protocol. If instance support RDMA read, messages whose size is larger than this value will be sent by read message protocol (Default 1048576).");
+	fi_param_define(&efa_prov, "inter_max_eager_message_size", FI_PARAM_SIZE_T,
+			"The inclusive maximum message size eligible for the inter EFA eager message protocol. The actual packet capacity still applies (Default: unlimited).");
+	fi_param_define(&efa_prov, "inter_max_medium_message_size", FI_PARAM_SIZE_T,
+			"The inclusive maximum message size eligible for the inter EFA medium message protocol (Default: 65536).");
+	fi_param_define(&efa_prov, "inter_min_read_message_size", FI_PARAM_SIZE_T,
+			"The inclusive minimum message size eligible for inter EFA read message protocols (Default: 1048576).");
 	fi_param_define(&efa_prov, "inter_max_gdrcopy_from_hmem_size", FI_PARAM_SIZE_T,
 			"The maximum message size for which data is copied out of device memory with gdrcopy when it is staged through bounce buffers. (Default 32768).");
-	fi_param_define(&efa_prov, "inter_min_read_write_size", FI_PARAM_INT,
-			"The minimum message size for inter EFA write to use read write protocol. If firmware support RDMA read, and FI_EFA_USE_DEVICE_RDMA is 1, write requests whose size is larger than this value will use the read write protocol (Default 65536). If the efa device supports RDMA write, device RDMA write will always be used.");
+	fi_param_define(&efa_prov, "inter_max_eager_write_size", FI_PARAM_SIZE_T,
+			"The inclusive maximum write size eligible for the inter EFA eager write protocol. The actual packet capacity still applies (Default: unlimited).");
+	fi_param_define(&efa_prov, "inter_min_read_write_size", FI_PARAM_SIZE_T,
+			"The inclusive minimum write size eligible for the inter EFA read-write protocol (Default: 65536). If the EFA device supports RDMA write, device RDMA write will always be used.");
 	fi_param_define(&efa_prov, "inter_read_segment_size", FI_PARAM_INT,
 			"Calls to RDMA read is segmented using this value.");
 	fi_param_define(&efa_prov, "fork_safe", FI_PARAM_BOOL,
@@ -322,18 +329,6 @@ void efa_env_define()
 		"instead of invoking the undefined behavior, which can "
 		"otherwise corrupt provider state or crash the process. "
 		"(Default: false)");
-	fi_param_define(
-		&efa_prov, "rdm_force_send_proto", FI_PARAM_STRING,
-		"Pin RDM send protocol selection to the protocol of this name "
-		"(`eager`, `medium`, ...) instead of the regular protocol "
-		"selection logic. The named protocol is used irrespective of "
-		"the regular protocol selection logic. This environment "
-		"variable is meant to be used for testing and debugging. If "
-		"the value of the environment variable does not match any of "
-		"the implemented protocols, the send operation will fail. This "
-		"environment variable does not affect protocol selection for "
-		"emulated RMA operations. (Default: unset, i.e. use default "
-		"protocol selection logic.");
 	fi_param_define(&efa_prov, "max_queued_copy", FI_PARAM_SIZE_T,
 			"The maximum number of rx pkts whose payload copies to "
 			"device memory are queued and done together. Must be "

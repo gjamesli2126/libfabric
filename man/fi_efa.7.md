@@ -1261,7 +1261,12 @@ These OFI runtime parameters apply only to the RDM endpoint.
   NOTE: This parameter is now deprecated.
 
 *FI_EFA_INTER_MAX_MEDIUM_MESSAGE_SIZE*
-: The maximum size for inter EFA messages to be sent by using medium message protocol. Messages which can fit in one packet will be sent as eager message. Messages whose sizes are smaller than this value will be sent using medium message protocol. Other messages will be sent using CTS based long message protocol.
+: The inclusive maximum size for inter EFA messages to be eligible for the
+  medium message protocol. The default is 65536.
+
+*FI_EFA_INTER_MAX_EAGER_MESSAGE_SIZE*
+: The inclusive maximum size for inter EFA messages to be eligible for the
+  eager message protocol. The actual single-packet capacity still applies.
 
 *FI_EFA_FORK_SAFE*
 : Enable fork() support. This may have a small performance impact and should only be set when required. Applications that require to register regions backed by huge pages and also require fork support are not supported.
@@ -1275,20 +1280,26 @@ CUDA memory with gdrcopy when the data is staged through internal bounce
 buffers. Larger message sizes use cudaMemcpy. (Default 32768).
 
 *FI_EFA_INTER_MIN_READ_MESSAGE_SIZE*
-: The minimum message size in bytes for inter EFA read message protocol. If instance support RDMA read, messages whose size is larger than this value will be sent by read message protocol. (Default 1048576).
+: The inclusive minimum message size in bytes for inter EFA read message
+  protocols. Normal memory registration, peer-to-peer, and RDMA-read capability
+  checks still apply. (Default 1048576).
 
 *FI_EFA_INTER_MIN_READ_WRITE_SIZE*
-: The mimimum message size for emulated inter EFA write to use read write protocol. If firmware support RDMA read, and FI_EFA_USE_DEVICE_RDMA is 1, write requests whose size is larger than this value will use the read write protocol (Default 65536). If the firmware supports RDMA write, device RDMA write will always be used.
+: The inclusive minimum message size for emulated inter EFA write to be
+  eligible for the read-write protocol. Normal capability checks still apply.
+  (Default 65536). Native device RDMA write remains preferred when available.
 
-*FI_EFA_RDM_FORCE_SEND_PROTO*
-: Pin RDM send protocol selection to the protocol of this name (`eager`,
-`medium`, ...) instead of the regular protocol selection logic. The named
-protocol is used irrespective of the regular protocol selection logic. This
-environment variable is meant to be used for testing and debugging. If the
-value of the environment variable does not match any of the implemented
-protocols, the send operation will fail. This environment variable does not
-affect protocol selection for emulated RMA operations.
-(Default: unset, i.e. use default protocol selection logic.)
+*FI_EFA_INTER_MAX_EAGER_WRITE_SIZE*
+: The inclusive maximum size for emulated inter EFA writes to be eligible for
+  the eager-write protocol. The actual single-packet capacity still applies.
+  Native device RDMA write remains preferred when available.
+
+Protocol selection bounds are eligibility windows, not force controls. A
+protocol is selected only when the message size is within its inclusive bounds
+and its normal capability checks pass. Overlapping windows use protocol
+registry order; a gap returns an error when no protocol is eligible.
+`FI_EFA_RUNT_SIZE` remains a per-peer runt-byte budget, not a message-size
+maximum. Zero-copy selection and native RDMA precedence are unchanged.
 
 *FI_EFA_USE_DEVICE_RDMA*
 : Specify whether to require or ignore RDMA features of the EFA device.
