@@ -3,6 +3,7 @@
  * rights reserved. */
 
 #include "efa_unit_tests.h"
+#include "rdm/protocols/efa_rdm_proto_eager_rma.h"
 #include "efa_rdm_rma.h"
 #include "efa_rdm_pke_nonreq.h"
 #include "efa_rdm_cq.h"
@@ -1314,4 +1315,290 @@ void test_efa_rdm_rma_writemsg_to_removed_addr(void **state)
 	assert_int_equal(ret, -FI_EINVAL);
 
 	efa_unit_test_buff_destruct(&local_buff);
+}
+
+/*
+ * Eager read / eager write (FI_EFA_RMA_FAST_PATH=1): one RMA == one WQE ==
+ * one 64-byte eager RMA entry, no TXE and no PKE. These tests guard the parts of efa-proto the fast path
+ * must keep: the CQ entry, the error entry, and the fallback to the TXE
+ * path when the op could see RNR.
+ */
+struct eager_rma_fixture {
+	struct efa_rdm_ep *ep;
+	struct efa_rdm_peer *peer;
+	struct efa_unit_test_buff buff;
+	struct iovec iov;
+	struct fi_rma_iov rma_iov;
+	void *desc;
+	fi_addr_t addr;
+	int fast_orig, track_mr_orig;
+};
+
+static void eager_rma_setup(struct efa_resource *resource,
+			    struct eager_rma_fixture *f)
+{
+	struct efa_ep_addr raw_addr;
+	size_t raw_addr_len = sizeof(raw_addr);
+	int ret;
+
+	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
+	f->ep = container_of(resource->ep, struct efa_rdm_ep,
+			     base_ep.util_ep.ep_fid);
+
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, &f->addr, 0, NULL);
+	assert_int_equal(ret, 1);
+
+	f->peer = efa_rdm_ep_get_peer_explicit(f->ep, f->addr);
+	assert_non_null(f->peer);
+	f->peer->flags |= EFA_RDM_PEER_HANDSHAKE_RECEIVED;
+	f->peer->extra_info[0] |= EFA_RDM_EXTRA_FEATURE_RDMA_READ |
+				  EFA_RDM_EXTRA_FEATURE_RDMA_WRITE;
+	f->peer->p2p_supported = true;
+	f->peer->device_version =
+		efa_rdm_ep_domain(f->ep)->device->ibv_attr.vendor_part_id;
+	f->ep->use_device_rdma = true;
+
+	efa_unit_test_buff_construct(&f->buff, resource, 4096);
+	f->desc = fi_mr_desc(f->buff.mr);
+	f->iov.iov_base = f->buff.buff;
+	f->iov.iov_len = f->buff.size;
+	f->rma_iov.addr = 0x87654321;
+	f->rma_iov.len = f->buff.size;
+	f->rma_iov.key = 123456;
+
+	f->fast_orig = efa_env.rma_fast_path;
+	f->track_mr_orig = efa_env.track_mr;
+	efa_env.rma_fast_path = 1;
+	efa_env.track_mr = 0;
+
+	g_efa_unit_test_mocks.efa_qp_post_read =
+		&efa_mock_efa_qp_post_read_return_mock;
+	g_efa_unit_test_mocks.efa_qp_post_write =
+		&efa_mock_efa_qp_post_write_return_mock;
+}
+
+static void eager_rma_teardown(struct eager_rma_fixture *f)
+{
+	efa_env.rma_fast_path = f->fast_orig;
+	efa_env.track_mr = f->track_mr_orig;
+	efa_unit_test_buff_destruct(&f->buff);
+}
+
+static void eager_rma_mock_poll(struct efa_rdm_ep *ep, int status, int n)
+{
+	int i;
+
+	g_efa_unit_test_mocks.efa_ibv_cq_start_poll =
+		&efa_mock_efa_ibv_cq_start_poll_use_saved_send_wr_with_mock_status;
+	g_efa_unit_test_mocks.efa_ibv_cq_next_poll =
+		&efa_mock_efa_ibv_cq_next_poll_use_saved_send_wr_with_mock_status;
+	g_efa_unit_test_mocks.efa_ibv_cq_end_poll =
+		&efa_mock_efa_ibv_cq_end_poll_check_mock;
+	g_efa_unit_test_mocks.efa_ibv_cq_wc_read_qp_num =
+		&efa_mock_efa_ibv_cq_wc_read_qp_num_return_mock;
+	will_return_int(
+		efa_mock_efa_ibv_cq_start_poll_use_saved_send_wr_with_mock_status,
+		status);
+	for (i = 1; i < n; i++)
+		will_return_int(
+			efa_mock_efa_ibv_cq_next_poll_use_saved_send_wr_with_mock_status,
+			status);
+	for (i = 0; i < n; i++)
+		will_return_uint(efa_mock_efa_ibv_cq_wc_read_qp_num_return_mock,
+				 ep->base_ep.qp->qp_num);
+	expect_function_call(efa_mock_efa_ibv_cq_end_poll_check_mock);
+}
+
+static uint64_t eager_rma_wr_id(int i)
+{
+	return (uint64_t) g_ibv_submitted_wr_id_vec[i];
+}
+
+/* Happy path: read and write each use 1 entry and no TXE, and the CQ
+ * entry is built from the entry alone. */
+void test_efa_rdm_rma_eager_rma_happy_path(void **state)
+{
+	struct efa_resource *resource = *state;
+	struct eager_rma_fixture f;
+	struct fi_cq_data_entry cq_entries[2] = {0};
+	struct fi_msg_rma read_msg, write_msg;
+	void *read_context = (void *) 0x1234560;
+	void *write_context = (void *) 0x2345670;
+	size_t outstanding;
+	int ret;
+
+	if (!efa_device_support_rdma_read() || !efa_device_support_rdma_write()) {
+		skip();
+		return;
+	}
+	eager_rma_setup(resource, &f);
+	efa_unit_test_construct_msg_rma(&read_msg, &f.iov, &f.desc, 1, f.addr,
+					&f.rma_iov, 1, read_context, 0);
+	efa_unit_test_construct_msg_rma(&write_msg, &f.iov, &f.desc, 1, f.addr,
+					&f.rma_iov, 1, write_context, 0);
+	outstanding = f.ep->efa_outstanding_tx_ops;
+
+	will_return_int(efa_mock_efa_qp_post_read_return_mock, 0);
+	will_return_int(efa_mock_efa_qp_post_write_return_mock, 0);
+	assert_int_equal(fi_readmsg(resource->ep, &read_msg, FI_COMPLETION), 0);
+	assert_int_equal(fi_writemsg(resource->ep, &write_msg, FI_COMPLETION), 0);
+
+	assert_int_equal(g_ibv_submitted_wr_id_cnt, 2);
+	assert_true(efa_rdm_eager_rma_is_wr_id(eager_rma_wr_id(0)));
+	assert_true(efa_rdm_eager_rma_is_wr_id(eager_rma_wr_id(1)));
+	assert_ptr_equal(efa_rdm_eager_rma_entry_from_wr_id(eager_rma_wr_id(0))->op_context,
+			 read_context);
+	assert_ptr_equal(efa_rdm_eager_rma_entry_from_wr_id(eager_rma_wr_id(1))->op_context,
+			 write_context);
+	assert_int_equal(efa_unit_test_get_ope_list_length(f.ep, EFA_RDM_TXE), 0);
+	assert_int_equal(f.ep->efa_outstanding_tx_ops, outstanding + 2);
+
+	eager_rma_mock_poll(f.ep, IBV_WC_SUCCESS, 2);
+	ret = fi_cq_read(resource->cq, cq_entries, 2);
+	assert_int_equal(ret, 2);
+	assert_ptr_equal(cq_entries[0].op_context, read_context);
+	assert_int_equal(cq_entries[0].flags, FI_RMA | FI_READ);
+	assert_ptr_equal(cq_entries[1].op_context, write_context);
+	assert_int_equal(cq_entries[1].flags, FI_RMA | FI_WRITE);
+	assert_int_equal(f.ep->efa_outstanding_tx_ops, outstanding);
+
+	eager_rma_teardown(&f);
+}
+
+/* Error path: a failed WQE becomes exactly one CQ error entry with the
+ * application context, and the entry is freed (no retry, no TXE). */
+static void eager_rma_error_case(struct efa_resource *resource, int vendor_err)
+{
+	struct eager_rma_fixture f;
+	struct fi_cq_data_entry cq_entry;
+	struct fi_cq_err_entry err_entry = {0};
+	struct fi_msg_rma msg;
+	void *context = (void *) 0x3456780;
+	size_t outstanding;
+	int ret;
+
+	eager_rma_setup(resource, &f);
+	efa_unit_test_construct_msg_rma(&msg, &f.iov, &f.desc, 1, f.addr,
+					&f.rma_iov, 1, context, 0);
+	outstanding = f.ep->efa_outstanding_tx_ops;
+
+	will_return_int(efa_mock_efa_qp_post_write_return_mock, 0);
+	assert_int_equal(fi_writemsg(resource->ep, &msg, FI_COMPLETION), 0);
+	assert_true(efa_rdm_eager_rma_is_wr_id(eager_rma_wr_id(0)));
+
+	g_efa_unit_test_mocks.efa_ibv_cq_wc_read_vendor_err =
+		&efa_mock_efa_ibv_cq_wc_read_vendor_err_return_mock;
+	will_return_uint(efa_mock_efa_ibv_cq_wc_read_vendor_err_return_mock,
+			 vendor_err);
+	eager_rma_mock_poll(f.ep, IBV_WC_GENERAL_ERR, 1);
+
+	ret = fi_cq_read(resource->cq, &cq_entry, 1);
+	assert_int_equal(ret, -FI_EAVAIL);
+	ret = fi_cq_readerr(resource->cq, &err_entry, 0);
+	assert_int_equal(ret, 1);
+	assert_ptr_equal(err_entry.op_context, context);
+	assert_int_equal(err_entry.flags, FI_RMA | FI_WRITE);
+	assert_int_equal(err_entry.prov_errno, vendor_err);
+	assert_int_equal(err_entry.len, f.buff.size);
+	assert_int_equal(f.ep->efa_outstanding_tx_ops, outstanding);
+	assert_int_equal(f.ep->efa_rnr_queued_pkt_cnt, 0);
+	assert_int_equal(efa_unit_test_get_ope_list_length(f.ep, EFA_RDM_TXE), 0);
+
+	eager_rma_teardown(&f);
+}
+
+void test_efa_rdm_rma_eager_rma_error_bad_address(void **state)
+{
+	if (!efa_device_support_rdma_write()) {
+		skip();
+		return;
+	}
+	eager_rma_error_case(*state, EFA_IO_COMP_STATUS_REMOTE_ERROR_BAD_ADDRESS);
+}
+
+/* RNR cannot happen on an eligible eager op; if the device still reports
+ * it, it is reported like any other error, never queued. */
+void test_efa_rdm_rma_eager_rma_error_rnr_is_final(void **state)
+{
+	if (!efa_device_support_rdma_write()) {
+		skip();
+		return;
+	}
+	eager_rma_error_case(*state, EFA_IO_COMP_STATUS_REMOTE_ERROR_RNR);
+}
+
+/* Missing handshake: the op must take the TXE path, which owns the
+ * handshake wait. */
+void test_efa_rdm_rma_eager_rma_no_handshake_uses_txe(void **state)
+{
+	struct efa_resource *resource = *state;
+	struct eager_rma_fixture f;
+	struct fi_msg_rma msg;
+	int i;
+
+	if (!efa_device_support_rdma_read()) {
+		skip();
+		return;
+	}
+	eager_rma_setup(resource, &f);
+	f.peer->flags &= ~EFA_RDM_PEER_HANDSHAKE_RECEIVED;
+	f.ep->homogeneous_peers = false;
+	efa_unit_test_construct_msg_rma(&msg, &f.iov, &f.desc, 1, f.addr,
+					&f.rma_iov, 1, (void *) 0x10, 0);
+
+	/* The TXE path sends a handshake request with efa_qp_post_send. */
+	g_efa_unit_test_mocks.efa_qp_post_send =
+		&efa_mock_efa_qp_post_send_return_mock;
+	will_return_int_maybe(efa_mock_efa_qp_post_send_return_mock, 0);
+
+	fi_readmsg(resource->ep, &msg, FI_COMPLETION);
+	/* The read has a TXE (the handshake request may own another one) ... */
+	assert_true(efa_unit_test_get_ope_list_length(f.ep, EFA_RDM_TXE) >= 1);
+	/* ... and nothing was posted on the eager path. */
+	for (i = 0; i < g_ibv_submitted_wr_id_cnt; i++)
+		assert_false(efa_rdm_eager_rma_is_wr_id(eager_rma_wr_id(i)));
+
+	eager_rma_teardown(&f);
+}
+
+/* Write with remote CQ data: eager only if it cannot see RNR. */
+void test_efa_rdm_rma_eager_rma_imm_needs_no_rnr(void **state)
+{
+	struct efa_resource *resource = *state;
+	struct eager_rma_fixture f;
+	struct fi_msg_rma msg;
+	int ret;
+
+	if (!efa_device_support_rdma_write()) {
+		skip();
+		return;
+	}
+	eager_rma_setup(resource, &f);
+	f.ep->homogeneous_peers = false;
+	f.ep->extra_info[0] &= ~EFA_RDM_EXTRA_FEATURE_UNSOLICITED_WRITE_RECV;
+	f.peer->extra_info[0] &= ~EFA_RDM_EXTRA_FEATURE_UNSOLICITED_WRITE_RECV;
+	efa_unit_test_construct_msg_rma(&msg, &f.iov, &f.desc, 1, f.addr,
+					&f.rma_iov, 1, (void *) 0x20, 0xbeef);
+
+	/* Finite RNR retry and the write takes an rx buffer: TXE path. */
+	f.ep->base_ep.rnr_retry = 3;
+	will_return_int(efa_mock_efa_qp_post_write_return_mock, 0);
+	ret = fi_writemsg(resource->ep, &msg, FI_COMPLETION | FI_REMOTE_CQ_DATA);
+	assert_int_equal(ret, 0);
+	assert_false(efa_rdm_eager_rma_is_wr_id(eager_rma_wr_id(0)));
+	assert_int_equal(efa_unit_test_get_ope_list_length(f.ep, EFA_RDM_TXE), 1);
+
+	/* Infinite RNR retry (NIXL's setting): eager. */
+	f.ep->base_ep.rnr_retry = EFA_RNR_INFINITE_RETRY;
+	will_return_int(efa_mock_efa_qp_post_write_return_mock, 0);
+	ret = fi_writemsg(resource->ep, &msg, FI_COMPLETION | FI_REMOTE_CQ_DATA);
+	assert_int_equal(ret, 0);
+	assert_true(efa_rdm_eager_rma_is_wr_id(eager_rma_wr_id(1)));
+	assert_int_equal(efa_unit_test_get_ope_list_length(f.ep, EFA_RDM_TXE), 1);
+
+	eager_rma_teardown(&f);
 }
