@@ -66,6 +66,8 @@ struct efa_env {
 	int use_sm2;
 	enum efa_env_huge_page_setting huge_page_setting;
 	int use_unsolicited_write_recv;
+	/* Use eager read/write (1 PKE, no TXE) for one-WQE RMA. 2 also logs fallbacks. */
+	int rma_fast_path;
 	/**
 	 * The threshold that EFA provider will refill the internal rx pkt pool.
 	 * When the number of internal rx pkts to post is lower than this threshold,

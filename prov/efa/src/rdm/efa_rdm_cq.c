@@ -13,6 +13,7 @@
 #include "efa_rdm_pke_nonreq.h"
 #include "efa_rdm_tracepoint.h"
 #include "efa_rdm_pke_print.h"
+#include "protocols/efa_rdm_proto_eager_rma.h"
 
 static
 const char *efa_rdm_cq_strerror(struct fid_cq *cq_fid, int prov_errno,
@@ -775,8 +776,8 @@ enum ibv_wc_status efa_rdm_cq_process_wc_closing_ep(struct efa_ibv_cq *cq, struc
 {
 	uint64_t wr_id = cq->ibv_cq_ex->wr_id;
 	enum ibv_wc_status status = cq->ibv_cq_ex->status;
-	enum ibv_wc_opcode opcode = efa_ibv_cq_wc_read_opcode(cq);
-	struct efa_rdm_pke *pkt_entry = efa_rdm_cq_get_pke_from_wr_id(cq, wr_id);
+	enum ibv_wc_opcode opcode;
+	struct efa_rdm_pke *pkt_entry;
 	int prov_errno;
 
 	/*
@@ -787,6 +788,15 @@ enum ibv_wc_status efa_rdm_cq_process_wc_closing_ep(struct efa_ibv_cq *cq, struc
 	assert(EFA_GENLOCK_HELD(&container_of(cq, struct efa_cq, ibv_cq)->util_cq.ep_list_lock,
 				efa_cq_ep_list_lock_sym));
 	assert(EFA_GENLOCK_HELD(&ep->srx_lock, efa_srx_lock_sym));
+
+	/* An eager read/write has no ope and nothing to report on close. */
+	if (!efa_cq_wc_is_unsolicited(cq) && efa_rdm_eager_rma_is_wr_id(wr_id)) {
+		efa_rdm_proto_eager_rma_release(ep, wr_id);
+		return status;
+	}
+
+	opcode = efa_ibv_cq_wc_read_opcode(cq);
+	pkt_entry = efa_rdm_cq_get_pke_from_wr_id(cq, wr_id);
 
 #if HAVE_LTTNG
 	efa_rdm_tracepoint(poll_cq, (size_t) wr_id);
@@ -855,10 +865,24 @@ enum ibv_wc_status efa_rdm_cq_process_wc(struct efa_ibv_cq *cq, struct efa_rdm_e
 	assert(EFA_GENLOCK_HELD(&ep->srx_lock, efa_srx_lock_sym));
 	uint64_t wr_id = cq->ibv_cq_ex->wr_id;
 	enum ibv_wc_status status = cq->ibv_cq_ex->status;
-	enum ibv_wc_opcode opcode = efa_ibv_cq_wc_read_opcode(cq);
-	struct efa_rdm_pke *pkt_entry = efa_rdm_cq_get_pke_from_wr_id(cq, wr_id);
+	enum ibv_wc_opcode opcode;
+	struct efa_rdm_pke *pkt_entry;
 
 	int prov_errno;
+
+	/*
+	 * Eager read/write: wr_id names a 64-byte entry, not a PKE. Its errors
+	 * are final (it cannot see RNR), so it is reported here, never retried.
+	 */
+	if (!efa_cq_wc_is_unsolicited(cq) && efa_rdm_eager_rma_is_wr_id(wr_id)) {
+		prov_errno = OFI_LIKELY(status == IBV_WC_SUCCESS) ?
+			     0 : efa_rdm_cq_process_prov_errno(cq, NULL);
+		efa_rdm_proto_eager_rma_handle_wc(ep, wr_id, status, prov_errno);
+		return status;
+	}
+
+	opcode = efa_ibv_cq_wc_read_opcode(cq);
+	pkt_entry = efa_rdm_cq_get_pke_from_wr_id(cq, wr_id);
 
 #if HAVE_LTTNG
 	efa_rdm_tracepoint(poll_cq, (size_t) wr_id);

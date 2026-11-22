@@ -123,6 +123,8 @@ struct efa_rdm_ep {
 
 	/* buffer pool for send & recv */
 	struct ofi_bufpool *efa_tx_pkt_pool;
+	/* minimal TX state of eager read/write, one entry per WQE */
+	struct ofi_bufpool *eager_rma_pool;
 	struct ofi_bufpool *efa_rx_pkt_pool;
 
 	/* staging area for unexpected and out-of-order packets */

@@ -15,6 +15,7 @@
 #include "efa_rdm_pkt_type.h"
 #include "efa_rdm_pke_req.h"
 #include "efa_rdm_pke_utils.h"
+#include "protocols/efa_rdm_proto_eager_rma.h"
 #include "efa_cntr.h"
 #include "efa_rdm_cntr.h"
 #include "efa_rdm_mr.h"
@@ -286,6 +287,16 @@ int efa_rdm_ep_create_buffer_pools(struct efa_rdm_ep *ep)
 	if (ret)
 		goto err_free;
 
+	ret = ofi_bufpool_create(&ep->eager_rma_pool,
+				 sizeof(struct efa_rdm_eager_rma_entry),
+				 EFA_RDM_BUFPOOL_ALIGNMENT,
+				 0, /* bounded by efa_max_outstanding_tx_ops */
+				 MAX(ep->efa_max_outstanding_tx_ops, 16),
+				 /* in-flight entries are dropped with the QP on close */
+				 OFI_BUFPOOL_NO_TRACK);
+	if (ret)
+		goto err_free;
+
 	ret = ofi_bufpool_create(&ep->base_ep.rxe_pool,
 				 sizeof(struct efa_rdm_ope),
 				 EFA_RDM_BUFPOOL_ALIGNMENT,
@@ -366,6 +377,9 @@ err_free:
 
 	if (ep->base_ep.txe_pool)
 		ofi_bufpool_destroy(ep->base_ep.txe_pool);
+
+	if (ep->eager_rma_pool)
+		ofi_bufpool_destroy(ep->eager_rma_pool);
 
 	if (ep->base_ep.rxe_pool)
 		ofi_bufpool_destroy(ep->base_ep.rxe_pool);
@@ -961,6 +975,9 @@ static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep)
 
 	if (efa_rdm_ep->base_ep.txe_pool)
 		ofi_bufpool_destroy(efa_rdm_ep->base_ep.txe_pool);
+
+	if (efa_rdm_ep->eager_rma_pool)
+		ofi_bufpool_destroy(efa_rdm_ep->eager_rma_pool);
 
 	if (efa_rdm_ep->base_ep.rxe_pool)
 		ofi_bufpool_destroy(efa_rdm_ep->base_ep.rxe_pool);

@@ -38,6 +38,7 @@ struct efa_env efa_env = {
 	.use_sm2 = false,
 	.huge_page_setting = EFA_ENV_HUGE_PAGE_UNSPEC,
 	.use_unsolicited_write_recv = 1,
+	.rma_fast_path = 0,
 	.internal_rx_refill_threshold = 8,
 	.rdm_txe_pool_size = EFA_RDM_TXE_POOL_SIZE_DEFAULT,
 	.use_data_path_direct = true,
@@ -73,6 +74,10 @@ static void efa_env_unregistered_param_get(void)
 	tmp = getenv("FI_EFA_ENABLE_COMP_ACTION");
 	if (tmp)
 		efa_env.enable_comp_action = atoi(tmp);
+
+	tmp = getenv("FI_EFA_RMA_FAST_PATH");
+	if (tmp)
+		efa_env.rma_fast_path = atoi(tmp);
 }
 
 static int efa_env_default_shm_av_size(void)

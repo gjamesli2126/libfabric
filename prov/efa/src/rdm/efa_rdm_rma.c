@@ -14,6 +14,7 @@
 #include "efa_rdm_pke_cmd.h"
 #include "efa_cntr.h"
 #include "efa_rdm_tracepoint.h"
+#include "protocols/efa_rdm_proto_eager_rma.h"
 
 int efa_rdm_rma_verified_copy_iov(struct efa_rdm_ep *ep, struct efa_rma_iov *rma,
 			      size_t count, uint32_t flags,
@@ -232,6 +233,12 @@ ssize_t efa_rdm_rma_generic_readmsg(struct efa_rdm_ep *efa_rdm_ep,
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
 		err = -FI_EAGAIN;
 		goto out;
+	}
+
+	if (efa_env.rma_fast_path) {
+		err = efa_rdm_proto_eager_read_post(efa_rdm_ep, peer, msg, fi_flags);
+		if (err != -FI_ENOSYS)
+			goto out;
 	}
 
 	txe = efa_rdm_rma_alloc_txe(efa_rdm_ep, peer, msg, ofi_op_read_req, fi_flags, internal_flags);
@@ -525,6 +532,12 @@ static inline ssize_t efa_rdm_rma_generic_writemsg(struct efa_rdm_ep *efa_rdm_ep
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
 		err = -FI_EAGAIN;
 		goto out;
+	}
+
+	if (efa_env.rma_fast_path) {
+		err = efa_rdm_proto_eager_write_post(efa_rdm_ep, peer, msg, fi_flags);
+		if (err != -FI_ENOSYS)
+			goto out;
 	}
 
 	txe = efa_rdm_rma_alloc_txe(efa_rdm_ep, peer, msg, ofi_op_write, fi_flags, internal_flags);
