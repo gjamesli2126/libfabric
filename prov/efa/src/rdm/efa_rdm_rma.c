@@ -14,7 +14,6 @@
 #include "efa_rdm_pke_cmd.h"
 #include "efa_cntr.h"
 #include "efa_rdm_tracepoint.h"
-#include "efa_rdm_cq.h"
 
 int efa_rdm_rma_verified_copy_iov(struct efa_rdm_ep *ep, struct efa_rma_iov *rma,
 			      size_t count, uint32_t flags,
@@ -202,87 +201,6 @@ ssize_t efa_rdm_rma_post_read(struct efa_rdm_ep *ep, struct efa_rdm_ope *txe)
 	return ret;
 }
 
-static inline ssize_t
-efa_rdm_rma_try_fast_path(struct efa_rdm_ep *ep, struct efa_rdm_peer *peer,
-			  const struct fi_msg_rma *msg, uint64_t fi_flags,
-			  bool is_write)
-	OFI_TSA_REQUIRES(efa_srx_lock_sym)
-{
-	struct efa_mr *efa_mr;
-	struct ibv_sge sge;
-	uint64_t tx_flags;
-	uintptr_t wr_id;
-	size_t len, max_len;
-	int use_p2p, err;
-
-	if (msg->iov_count != 1 || msg->rma_iov_count != 1 ||
-	    !msg->desc || !msg->desc[0])
-		return -FI_ENOSYS;
-
-	if (peer->is_self || ep->msg_prefix_size || efa_env.track_mr)
-		return -FI_ENOSYS;
-
-	if (!ep->homogeneous_peers &&
-	    !(peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED))
-		return -FI_ENOSYS;
-
-	tx_flags = efa_rdm_msg_get_tx_flags(ep, fi_flags);
-	if (!(tx_flags & FI_COMPLETION) ||
-	    (tx_flags & ~(FI_COMPLETION | FI_TRANSMIT_COMPLETE)))
-		return -FI_ENOSYS;
-
-	if ((uintptr_t) msg->context & EFA_RDM_FAST_RMA_WR_ID_MASK)
-		return -FI_ENOSYS;
-
-	len = msg->msg_iov[0].iov_len;
-	max_len = is_write ? efa_env.efa_write_segment_size :
-			     efa_env.efa_read_segment_size;
-	max_len = MIN(max_len, efa_rdm_ep_domain(ep)->device->max_rdma_size);
-	if (!len || len != msg->rma_iov[0].len || len > max_len)
-		return -FI_ENOSYS;
-
-	efa_mr = msg->desc[0];
-	use_p2p = efa_rdm_ep_use_p2p_for_mr(ep, efa_mr);
-	if (use_p2p <= 0)
-		return -FI_ENOSYS;
-
-	if (is_write) {
-		if (!efa_both_support_rdma_write(ep, peer) ||
-		    !efa_both_support_p2p(ep, peer, use_p2p))
-			return -FI_ENOSYS;
-	} else if (!efa_rdm_rma_should_read_using_rdma(ep, peer, use_p2p)) {
-		return -FI_ENOSYS;
-	}
-
-	if (efa_rdm_ep_get_available_tx_pkts(ep) == 0)
-		return -FI_EAGAIN;
-
-	sge.addr = (uintptr_t) msg->msg_iov[0].iov_base;
-	sge.length = len;
-	sge.lkey = efa_mr->lkey;
-	wr_id = (uintptr_t) msg->context | EFA_RDM_FAST_RMA_WR_ID_BIT;
-	if (is_write)
-		wr_id |= EFA_RDM_FAST_RMA_WRITE_WR_ID_BIT;
-
-	if (is_write)
-		err = efa_qp_post_write(ep->base_ep.qp, &sge, 1, NULL, false,
-					msg->rma_iov[0].key,
-					msg->rma_iov[0].addr, wr_id, 0,
-					tx_flags, peer->ah, peer->qpn,
-					peer->qkey, NULL);
-	else
-		err = efa_qp_post_read(ep->base_ep.qp, &sge, 1,
-				       msg->rma_iov[0].key,
-				       msg->rma_iov[0].addr, wr_id,
-				       tx_flags, peer->ah, peer->qpn,
-				       peer->qkey);
-	if (OFI_UNLIKELY(err))
-		return (err == ENOMEM) ? -FI_EAGAIN : -err;
-
-	ep->efa_outstanding_tx_ops++;
-	return 0;
-}
-
 ssize_t efa_rdm_rma_generic_readmsg(struct efa_rdm_ep *efa_rdm_ep,
 				    const struct fi_msg_rma *msg, uint64_t fi_flags,
 				    uint32_t internal_flags)
@@ -315,10 +233,6 @@ ssize_t efa_rdm_rma_generic_readmsg(struct efa_rdm_ep *efa_rdm_ep,
 		err = -FI_EAGAIN;
 		goto out;
 	}
-
-	err = efa_rdm_rma_try_fast_path(efa_rdm_ep, peer, msg, fi_flags, false);
-	if (err != -FI_ENOSYS)
-		goto out;
 
 	txe = efa_rdm_rma_alloc_txe(efa_rdm_ep, peer, msg, ofi_op_read_req, fi_flags, internal_flags);
 	if (OFI_UNLIKELY(!txe)) {
@@ -612,10 +526,6 @@ static inline ssize_t efa_rdm_rma_generic_writemsg(struct efa_rdm_ep *efa_rdm_ep
 		err = -FI_EAGAIN;
 		goto out;
 	}
-
-	err = efa_rdm_rma_try_fast_path(efa_rdm_ep, peer, msg, fi_flags, true);
-	if (err != -FI_ENOSYS)
-		goto out;
 
 	txe = efa_rdm_rma_alloc_txe(efa_rdm_ep, peer, msg, ofi_op_write, fi_flags, internal_flags);
 	if (OFI_UNLIKELY(!txe)) {
