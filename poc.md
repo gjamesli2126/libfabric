@@ -127,9 +127,12 @@ changes for it:
   same);
 - the device can do RDMA read / write to this peer for this memory;
 - op flags are only completion, transmit-complete, "more to come", and for
-  writes, remote CQ data;
+  writes, remote CQ data and delivery-complete;
 - the remote CQ data rule above holds;
 - not an op to self, and MR tracking is off.
+
+Eager WRITE with delivery-complete uses the successful device CQE, as the
+existing native WRITE path does.
 
 NIXL's 16 KB reads and writes meet all of these after the first few ops of a
 connection (which go through the handshake).

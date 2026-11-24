@@ -40,7 +40,7 @@
 #define EFA_RDM_EAGER_RMA_READ_FLAGS \
 	(FI_COMPLETION | FI_TRANSMIT_COMPLETE | FI_MORE)
 #define EFA_RDM_EAGER_RMA_WRITE_FLAGS \
-	(EFA_RDM_EAGER_RMA_READ_FLAGS | FI_REMOTE_CQ_DATA)
+	(EFA_RDM_EAGER_RMA_READ_FLAGS | FI_REMOTE_CQ_DATA | FI_DELIVERY_COMPLETE)
 
 /* PoC diagnostics: FI_EFA_RMA_FAST_PATH=2 logs the first fallback reasons. */
 static inline ssize_t efa_rdm_eager_rma_fallback(const char *op,

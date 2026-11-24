@@ -32,7 +32,7 @@ Only when nothing can go wrong that software would have to fix:
 | 1 local + 1 remote buffer, fits one WQE | no segmentation |
 | peer handshake already done | capabilities known; no waiting |
 | no RNR possible | no software retry needed |
-| simple op flags only | no delivery-complete, no inject |
+| supported op flags only | WRITE allows delivery-complete. Inject falls back. |
 
 Reads and plain writes can never see RNR (they use no receive buffer). A write
 with remote CQ data may, so it is eligible only if the target does not need a
