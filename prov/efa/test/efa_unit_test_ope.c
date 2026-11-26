@@ -1525,16 +1525,63 @@ void test_efa_rdm_ope_eor_packet_tracking_wait_send(void **state)
 }
 
 /**
- * @brief Test failed EOR packet posting
+ * @brief Test failed EOR posting on the final long-read completion
  *
- * Verifies that failed EOR packet posting does not add operations
- * to the ope_posted_ack_list.
+ * Verifies that the failure releases the RXE and reports only an error.
  *
  * @param[in] state cmocka state variable
  */
 void test_efa_rdm_ope_eor_packet_failed_posting(void **state)
 {
-	test_efa_rdm_ope_ack_packet_failed_posting_common(state, EFA_RDM_EOR_PKT);
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *ep;
+	struct efa_rdm_ope *rxe;
+	struct efa_rdm_pke *pkt;
+	struct efa_rdm_rma_context_pkt *ctx;
+	struct fi_cq_err_entry err = {0};
+	struct fi_cq_tagged_entry comp;
+	const size_t len = 16;
+	ssize_t ret;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	rxe = efa_unit_test_alloc_rxe(resource, ofi_op_msg);
+	assert_non_null(rxe);
+	ep = rxe->ep;
+	rxe->state = EFA_RDM_RXE_MATCHED;
+	rxe->bytes_read_completed = 0;
+	rxe->bytes_read_total_len = len;
+	rxe->total_len = len;
+	rxe->fi_flags = FI_COMPLETION;
+	rxe->cq_entry = (struct fi_cq_tagged_entry) {
+		.flags = FI_RECV | FI_MSG,
+		.len = len,
+	};
+
+	pkt = efa_rdm_pke_alloc(ep, ep->efa_tx_pkt_pool, EFA_RDM_PKE_FROM_EFA_TX_POOL);
+	assert_non_null(pkt);
+	pkt->peer = rxe->peer;
+	efa_rdm_pke_set_ope(pkt, rxe);
+	ctx = (struct efa_rdm_rma_context_pkt *) pkt->wiredata;
+	*ctx = (struct efa_rdm_rma_context_pkt) {
+		.type = EFA_RDM_RMA_CONTEXT_PKT,
+		.version = EFA_RDM_PROTOCOL_VERSION,
+		.context_type = EFA_RDM_RDMA_READ_CONTEXT,
+		.seg_size = len,
+	};
+	g_efa_unit_test_mocks.efa_qp_post_send = &efa_mock_efa_qp_post_send_return_mock;
+	will_return_int(efa_mock_efa_qp_post_send_return_mock, EINVAL);
+
+	ofi_genlock_lock(&ep->srx_lock);
+	ret = efa_rdm_pke_handle_rma_completion(pkt);
+	ofi_genlock_unlock(&ep->srx_lock);
+
+	assert_int_equal(ret, 0);
+	assert_true(dlist_empty(&ep->ope_posted_ack_list));
+	assert_int_equal(efa_unit_test_get_ope_list_length(ep, EFA_RDM_RXE), 0);
+	assert_int_equal(fi_cq_readerr(resource->cq, &err, 0), 1);
+	assert_int_equal(err.err, FI_EINVAL);
+	assert_int_equal(err.prov_errno, FI_EFA_ERR_PKT_POST);
+	assert_int_equal(fi_cq_read(resource->cq, &comp, 1), -FI_EAGAIN);
 }
 
 /**
