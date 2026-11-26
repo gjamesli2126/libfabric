@@ -899,9 +899,9 @@ static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep)
 #if ENABLE_DEBUG
 	struct efa_rdm_pke *pkt_entry;
 	/*
-	 * Queued-copy packets are also tracked by rx_pkt_list in debug builds.
-	 * Drain queued_copy_vec first; otherwise the debug sweep may free a
-	 * packet that later OPE cleanup still dereferences.
+	 * LONGCTS RTR TXEs can own queued copies of packets on rx_pkt_list
+	 * at close. Purge the copies before the debug sweep so TXE release
+	 * during the later ope_list sweep cannot dereference freed packets.
 	 */
 	while (efa_rdm_ep->queued_copy_num > 0) {
 		pkt_entry = efa_rdm_ep->queued_copy_vec[0].pkt_entry;
