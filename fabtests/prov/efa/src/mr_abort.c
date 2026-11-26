@@ -970,12 +970,12 @@ static int flush_rxcq(void)
 	return 0;
 }
 
-/*
- * Wait for the initiator to finish draining its TX completions while keeping
- * every target domain making manual progress.
- */
+/* Wait for the initiator to finish draining its TX completions. */
 static int target_progress_until_abort_done(void)
 {
+	/* Writedata produces target CQ entries even with automatic progress. */
+	bool drain_rx = fi->domain_attr->data_progress == FI_PROGRESS_MANUAL ||
+			opts.rma_op == FT_RMA_WRITEDATA;
 	int done = 0;
 	size_t got = 0;
 	int ret;
@@ -989,7 +989,10 @@ static int target_progress_until_abort_done(void)
 		if (ret == 1)
 			return done ? 0 : -FI_EOTHER;
 
-		ret = flush_rxcq();
+		if (drain_rx)
+			ret = flush_rxcq();
+		else
+			ret = ft_poll_fd(oob_sock, -1);
 		if (ret)
 			return ret;
 	}
@@ -1207,8 +1210,8 @@ static int run_fill_abort_initiator(int iter)
  * Fill-and-abort (RMA) -- target.
  *
  * Initiator-close mode: no MRs to close here. For writedata, pre-sync so the
- * target is ready before the initiator floods. Then keep driving target RX
- * progress until the initiator reports that its TX CQ drain is complete.
+ * target is ready before the initiator floods. While waiting for the
+ * initiator, drive manual progress and drain writedata CQ entries.
  *
  * Target-close mode:
  *   1. Wait for the single go-signal write-with-imm on the rxcq.
