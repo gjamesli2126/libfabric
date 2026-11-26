@@ -86,6 +86,8 @@ void efa_rdm_proto_longcts_handle_cts_recv(struct efa_rdm_pke *pkt_entry)
 
 	if (ope->state == EFA_RDM_OPE_ERR) {
 		efa_rdm_pke_release_rx(pkt_entry);
+		if (ope->type == EFA_RDM_TXE)
+			efa_rdm_txe_release_error_if_drained(ope);
 		return;
 	}
 
@@ -112,6 +114,8 @@ void efa_rdm_proto_longcts_handle_ctsdata_recv(struct efa_rdm_pke *pkt_entry)
 
 	if (!ope || ope->state == EFA_RDM_OPE_ERR) {
 		efa_rdm_pke_release_rx(pkt_entry);
+		if (ope && ope->type == EFA_RDM_TXE)
+			efa_rdm_txe_release_error_if_drained(ope);
 		return;
 	}
 
