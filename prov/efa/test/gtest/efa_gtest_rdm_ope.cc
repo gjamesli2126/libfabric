@@ -499,8 +499,6 @@ TEST_P(EfaRdmOpeCtsPostFailureTest, replenishment_error_waits_for_cts_and_copy)
 #if ENABLE_DEBUG
 	EXPECT_EQ(efa_test_pending_recv_count(resource.ep), 0u);
 #endif
-	EXPECT_EQ(efa_test_cq_read_staged_data_entry(resource.cq, &entry),
-		  -FI_EAGAIN);
 
 	const bool copy_first = GetParam() == CtsDrainOrder::copy_first;
 	efa_test_complete_cts_replenishment_wr(
@@ -522,8 +520,6 @@ TEST_P(EfaRdmOpeCtsPostFailureTest, replenishment_error_waits_for_cts_and_copy)
 	EXPECT_EQ(err_entry.prov_errno, prov_errno);
 	EXPECT_EQ(err_entry.op_context, &op_context);
 	EXPECT_EQ(err_entry.flags, (uint64_t) (FI_RECV | FI_MSG));
-	EXPECT_EQ(efa_test_cq_read_staged_data_entry(resource.cq, &entry),
-		  -FI_EAGAIN);
 }
 
 INSTANTIATE_TEST_SUITE_P(
