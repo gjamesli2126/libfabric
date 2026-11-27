@@ -809,6 +809,30 @@ void test_efa_rdm_pke_flush_queued_blocking_copy_to_hmem_copy_size_mismatch(void
 }
 
 /**
+ * @brief Queue a 64-byte blocking copy for @p ope without triggering a flush,
+ *        replicating efa_rdm_pke_queued_copy_payload_to_hmem().
+ */
+static struct efa_rdm_pke *
+efa_unit_test_queue_blocking_copy(struct efa_rdm_ep *ep, struct efa_rdm_ope *ope)
+{
+	struct efa_rdm_pke *pke;
+
+	pke = efa_rdm_pke_alloc(ep, ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
+	assert_non_null(pke);
+	pke->payload = pke->wiredata;
+	pke->payload_size = 64;
+	efa_rdm_pke_set_ope(pke, ope);
+	ep->queued_copy_vec[ep->queued_copy_num++] = (struct efa_rdm_ep_queued_copy) {
+		.pkt_entry = pke,
+		.data = pke->payload,
+		.data_size = pke->payload_size,
+	};
+	ope->bytes_queued_blocking_copy += pke->payload_size;
+	efa_rdm_pke_mark_held(pke);
+	return pke;
+}
+
+/**
  * @brief Releasing an rxe must purge its still-queued blocking copies.
  *
  * The blocking-copy batch spans transfers, so an rxe torn down early
@@ -857,37 +881,10 @@ void test_efa_rdm_rxe_release_purges_queued_blocking_copy(void **state)
 	rxe_b->desc[0] = &mock_mr;
 	rxe_b->total_len = sizeof(buf_b);
 
-	/* Queue two blocking copies for rxe_a, then one for rxe_b, replicating
-	 * efa_rdm_pke_queued_copy_payload_to_hmem() without triggering a flush. */
-	for (i = 0; i < 2; i++) {
-		pkt_a[i] = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
-		assert_non_null(pkt_a[i]);
-		pkt_a[i]->payload = pkt_a[i]->wiredata;
-		pkt_a[i]->payload_size = 64;
-		pkt_a[i]->ope = rxe_a;
-		pkt_a[i]->ope_gen = rxe_a->gen;
-		efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].pkt_entry = pkt_a[i];
-		efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].data = pkt_a[i]->payload;
-		efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].data_size = pkt_a[i]->payload_size;
-		efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].data_offset = 0;
-		efa_rdm_ep->queued_copy_num++;
-		rxe_a->bytes_queued_blocking_copy += pkt_a[i]->payload_size;
-		efa_rdm_pke_mark_held(pkt_a[i]);
-	}
-
-	pkt_b = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
-	assert_non_null(pkt_b);
-	pkt_b->payload = pkt_b->wiredata;
-	pkt_b->payload_size = 64;
-	pkt_b->ope = rxe_b;
-	pkt_b->ope_gen = rxe_b->gen;
-	efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].pkt_entry = pkt_b;
-	efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].data = pkt_b->payload;
-	efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].data_size = pkt_b->payload_size;
-	efa_rdm_ep->queued_copy_vec[efa_rdm_ep->queued_copy_num].data_offset = 0;
-	efa_rdm_ep->queued_copy_num++;
-	rxe_b->bytes_queued_blocking_copy += pkt_b->payload_size;
-	efa_rdm_pke_mark_held(pkt_b);
+	/* Queue two blocking copies for rxe_a, then one for rxe_b. */
+	for (i = 0; i < 2; i++)
+		pkt_a[i] = efa_unit_test_queue_blocking_copy(efa_rdm_ep, rxe_a);
+	pkt_b = efa_unit_test_queue_blocking_copy(efa_rdm_ep, rxe_b);
 
 	assert_int_equal(efa_rdm_ep->queued_copy_num, 3);
 
@@ -916,19 +913,12 @@ void test_efa_rdm_rxe_release_purges_queued_blocking_copy(void **state)
 		assert_non_null(txe[i]);
 		txe[i]->cuda_copy_method = EFA_RDM_CUDA_COPY_BLOCKING;
 		efa_rdm_ep->blocking_copy_rxe_num++;
-		pkt_b = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
-		assert_non_null(pkt_b);
-		pkt_b->payload_size = 64;
-		efa_rdm_pke_set_ope(pkt_b, txe[i]);
-		efa_rdm_ep->queued_copy_vec[i] = (struct efa_rdm_ep_queued_copy) {.pkt_entry = pkt_b};
-		txe[i]->bytes_queued_blocking_copy = pkt_b->payload_size;
-		efa_rdm_pke_mark_held(pkt_b);
+		efa_unit_test_queue_blocking_copy(efa_rdm_ep, txe[i]);
 	}
 #if ENABLE_DEBUG
 	dlist_insert_tail(&txe[0]->pending_recv_entry, &efa_rdm_ep->ope_recv_list);
 	efa_rdm_ep->pending_recv_counter++;
 #endif
-	efa_rdm_ep->queued_copy_num = 2;
 	txe[0]->proto = &efa_rdm_proto_eager;
 	pkts_to_post_before = efa_rdm_ep->efa_rx_pkts_to_post;
 	assert_false(efa_rdm_txe_handle_error(txe[0], FI_EIO, EFA_IO_COMP_STATUS_LOCAL_ERROR_UNRESP_REMOTE));
